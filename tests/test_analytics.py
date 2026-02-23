@@ -236,6 +236,7 @@ class AnalyticsTests(unittest.TestCase):
                 page_size=100,
                 max_pages=None,
                 workers=2,
+                parallel_window_hours=24,
                 timeout=1,
                 retries=1,
                 strict_sources=False,
@@ -553,11 +554,13 @@ class AnalyticsTests(unittest.TestCase):
                         page_size=100,
                         max_pages=None,
                         workers=1,
+                        parallel_window_hours=24,
                         timeout=1,
                         retries=1,
                         strict_sources=False,
                         conn=conn,
                         overlap_hours=1,  # 3600s
+                        checkpoint_pages=10,
                         v2_spike_min_swap_count=10,
                         v2_spike_min_reserve_weth=10.0,
                     )

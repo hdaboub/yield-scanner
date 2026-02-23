@@ -218,5 +218,12 @@ Important: if `--schedule-min-occurrences` is `2`, you generally need at least 3
   - `deploy/digitalocean/install_runtime.sh`
   - `deploy/digitalocean/setup_lpscan.sh`
   - `deploy/digitalocean/deploy_update_and_run.sh`
+
+## GitHub Workflow
+
+- CI: `.github/workflows/ci.yml` (compile checks + unit tests on PRs/pushes)
+- Release: `.github/workflows/release.yml` (auto GitHub Release on `v*` tags)
+- Branch protection + versioning policy: `docs/github-versioning.md`
+- Tag helper script: `scripts/release.sh`
   - `deploy/digitalocean/enable_ops_hardening.sh`
   - `deploy/digitalocean/README.md`

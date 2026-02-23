@@ -1876,9 +1876,9 @@ def fetch_with_cache(
 def rank_pools(
     observations: Iterable[Observation],
     min_samples: int,
-    min_tvl_usd: float,
-    max_hourly_yield_pct: float | None,
-    trim_ratio: float,
+    min_tvl_usd: float = 0.0,
+    max_hourly_yield_pct: float | None = None,
+    trim_ratio: float = 0.10,
 ) -> list[PoolRanking]:
     grouped: dict[tuple[str, str, str, str, str, int], list[Observation]] = {}
     for obs in observations:
