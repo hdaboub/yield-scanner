@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+output/
+.venv/
+.pytest_cache/
+.mypy_cache/
+*.log
+*.sqlite
+*.sqlite3
+output_from_droplet/
+.env
+.env.*
+*.pem
+*.key
+node_modules/
+uniswap/

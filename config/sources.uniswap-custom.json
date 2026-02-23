@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "name": "uniswap-custom-v3-shape",
+      "enabled": true,
+      "version": "v3",
+      "chain": "custom",
+      "endpoint": "${UNISWAP_SUBGRAPH_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-custom-v4-shape",
+      "enabled": true,
+      "version": "v4",
+      "chain": "custom",
+      "endpoint": "${UNISWAP_SUBGRAPH_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    }
+  ]
+}

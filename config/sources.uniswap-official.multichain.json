@@ -1,0 +1,173 @@
+{
+  "sources": [
+    {
+      "name": "uniswap-v3-mainnet-official",
+      "enabled": true,
+      "version": "v3",
+      "chain": "ethereum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-mainnet-official",
+      "enabled": true,
+      "version": "v4",
+      "chain": "ethereum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/DiYPVdygkfjDWhbxGSqAQxwBKmfKnkWQojqeM2rkLb3G",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v3-arbitrum-official",
+      "enabled": true,
+      "version": "v3",
+      "chain": "arbitrum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-arbitrum-official",
+      "enabled": true,
+      "version": "v4",
+      "chain": "arbitrum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/G5TsTKNi8yhPSV7kycaE23oWbqv9zzNqR49FoEQjzq1r",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v3-base-official",
+      "enabled": true,
+      "version": "v3",
+      "chain": "base",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/43Hwfi3dJSoGpyas9VwNoDAv55yjgGrPpNSmbQZArzMG",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-base-official",
+      "enabled": true,
+      "version": "v4",
+      "chain": "base",
+      "backfill_source": true,
+      "page_size": 1000,
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/HNCFA9TyBqpo5qpe6QreQABAA1kV8g46mhkCcicu6v2R",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v3-polygon-official",
+      "enabled": true,
+      "version": "v3",
+      "chain": "polygon",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-polygon-official",
+      "enabled": true,
+      "version": "v4",
+      "chain": "polygon",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/CwpebM66AH5uqS5sreKij8yEkkPcHvmyEs7EwFtdM5ND",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v3-unichain-official",
+      "enabled": true,
+      "version": "v3",
+      "chain": "unichain",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/BCfy6Vw9No3weqVq9NhyGo4FkVCJep1ZN9RMJj5S32fX",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-unichain-official",
+      "enabled": true,
+      "version": "v4",
+      "chain": "unichain",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/EoCvJ5tyMLMJcTnLQwWpjAtPdn74PcrZgzfcT5bYxNBH",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v3-bnb-official",
+      "enabled": true,
+      "version": "v3",
+      "chain": "bnb",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/F85MNzUGYqgSHSHRGgeVMNsdnW1KtZSVgFULumXRZTw2",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-bnb-official",
+      "enabled": true,
+      "version": "v4",
+      "chain": "bnb",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/2qQpC8inZPZL4tYfRQPFGZhsE8mYzE67n5z3Yf5uuKMu",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    },
+    {
+      "name": "sushi-v2-fee-spikes-mainnet",
+      "enabled": true,
+      "source_type": "v2_spike",
+      "version": "v2",
+      "chain": "ethereum",
+      "endpoint": "https://api.studio.thegraph.com/query/1742316/llama/v0.2.1",
+      "weth_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    },
+    {
+      "name": "template-sushiswap-v3-arbitrum",
+      "enabled": false,
+      "version": "v3",
+      "chain": "arbitrum",
+      "endpoint": "${SUSHI_V3_ARB_SUBGRAPH_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql",
+      "note": "Template only. Enable when endpoint/schema is verified compatible."
+    },
+    {
+      "name": "template-pancakeswap-v3-bnb",
+      "enabled": false,
+      "version": "v3",
+      "chain": "bnb",
+      "endpoint": "${PANCAKE_V3_BNB_SUBGRAPH_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql",
+      "note": "Template only. Enable when endpoint/schema is verified compatible."
+    },
+    {
+      "name": "template-pancakeswap-v3-ethereum",
+      "enabled": false,
+      "version": "v3",
+      "chain": "ethereum",
+      "endpoint": "${PANCAKE_V3_ETH_SUBGRAPH_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql",
+      "note": "Template only. Enable when endpoint/schema is verified compatible."
+    },
+    {
+      "name": "template-aerodrome-v3-base",
+      "enabled": false,
+      "version": "v3",
+      "chain": "base",
+      "endpoint": "${AERODROME_V3_BASE_SUBGRAPH_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql",
+      "note": "Template only. Enable when endpoint/schema is verified compatible."
+    },
+    {
+      "name": "template-algebra-v3-polygon",
+      "enabled": false,
+      "version": "v3",
+      "chain": "polygon",
+      "endpoint": "${ALGEBRA_V3_POLYGON_SUBGRAPH_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql",
+      "note": "Template only. Enable when endpoint/schema is verified compatible."
+    },
+    {
+      "name": "template-traderjoe-v2-avalanche",
+      "enabled": false,
+      "source_type": "v2_spike",
+      "version": "v2",
+      "chain": "avalanche",
+      "endpoint": "${TRADERJOE_V2_AVAX_SUBGRAPH_ENDPOINT}",
+      "weth_address": "${WAVAX_ADDRESS}",
+      "note": "Template only for v2-like fee spike signal. Enable after verifying schema fields."
+    },
+    {
+      "name": "uniswap-v3-solana",
+      "enabled": false,
+      "version": "v3",
+      "chain": "solana",
+      "note": "Uniswap v3/v4 pool subgraphs are EVM-focused. Solana is unsupported by this scanner's current source model."
+    }
+  ]
+}

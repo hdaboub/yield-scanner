@@ -1,0 +1,19 @@
+{
+  "sources": [
+    {
+      "name": "uniswap-v3-ethereum",
+      "version": "v3",
+      "chain": "ethereum",
+      "endpoint": "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-ethereum",
+      "enabled": false,
+      "version": "v4",
+      "chain": "ethereum",
+      "endpoint": "${UNISWAP_V4_ENDPOINT}",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "name": "uniswap-v3-ethereum",
+      "enabled": true,
+      "version": "v3",
+      "chain": "ethereum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/name/uniswap/uniswap-v3",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-ethereum",
+      "enabled": true,
+      "version": "v4",
+      "chain": "ethereum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_API_KEY}/subgraphs/name/uniswap/uniswap-v4",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    }
+  ]
+}

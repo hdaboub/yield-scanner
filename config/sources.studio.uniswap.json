@@ -1,0 +1,26 @@
+{
+  "sources": [
+    {
+      "name": "uniswap-studio-v3-shape",
+      "enabled": true,
+      "version": "v3",
+      "chain": "mainnet",
+      "endpoint": "https://api.studio.thegraph.com/query/1742316/uniswap/v0.0.1",
+      "headers": {
+        "Authorization": "Bearer ${THE_GRAPH_API_KEY}"
+      },
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-studio-v4-shape",
+      "enabled": true,
+      "version": "v4",
+      "chain": "mainnet",
+      "endpoint": "https://api.studio.thegraph.com/query/1742316/uniswap/v0.0.1",
+      "headers": {
+        "Authorization": "Bearer ${THE_GRAPH_API_KEY}"
+      },
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    }
+  ]
+}

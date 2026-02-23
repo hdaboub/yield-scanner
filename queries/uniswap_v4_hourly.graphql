@@ -1,0 +1,24 @@
+query PoolHourly($first: Int!, $start: Int!, $end: Int!, $afterId: String!) {
+  hourly: poolHourDatas(
+    first: $first
+    orderBy: id
+    orderDirection: asc
+    where: { periodStartUnix_gte: $start, periodStartUnix_lt: $end, id_gt: $afterId }
+  ) {
+    id
+    ts: periodStartUnix
+    volumeUSD
+    tvlUSD
+    feesUSD
+    pool {
+      id
+      feeTier
+      token0 {
+        symbol
+      }
+      token1 {
+        symbol
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "sources": [
+    {
+      "name": "uniswap-v3-mainnet-official",
+      "enabled": true,
+      "version": "v3",
+      "chain": "ethereum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
+      "hourly_query_file": "../queries/uniswap_v3_hourly.graphql"
+    },
+    {
+      "name": "uniswap-v4-mainnet-official",
+      "enabled": true,
+      "version": "v4",
+      "chain": "ethereum",
+      "endpoint": "https://gateway.thegraph.com/api/${THE_GRAPH_QUERY_API_KEY}/subgraphs/id/AdA6Ax3jtct69NnXfxNjWtPTe9gMtSEZx2tTQcT4VHu",
+      "hourly_query_file": "../queries/uniswap_v4_hourly.graphql"
+    },
+    {
+      "name": "sushi-v2-fee-spikes-mainnet",
+      "enabled": true,
+      "source_type": "v2_spike",
+      "version": "v2",
+      "chain": "ethereum",
+      "endpoint": "https://api.studio.thegraph.com/query/1742316/llama/v0.2.1",
+      "weth_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+    }
+  ]
+}
