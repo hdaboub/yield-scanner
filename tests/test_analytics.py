@@ -245,7 +245,7 @@ class AnalyticsTests(unittest.TestCase):
             text = out.read_text(encoding="utf-8")
             self.assertIn("0 fetched", text)
             self.assertIn("meta.block=12345", text)
-            self.assertIn("Window UTC", text)
+            self.assertIn("Window (CST)", text)
 
     def test_report_llama_empty_case_b_shows_filtered_out_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

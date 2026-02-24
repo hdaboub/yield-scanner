@@ -1154,6 +1154,26 @@ def iso_hour_local(ts: int, tz_name: str) -> str:
     return dt_local.strftime("%Y-%m-%d %H:00:00 %Z")
 
 
+def format_ts_cst(ts: int) -> str:
+    if ZoneInfo is None:
+        dt_utc = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
+        return dt_utc.strftime("%m/%d/%y %H:%M UTC")
+    dt_local = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).astimezone(
+        ZoneInfo("America/Chicago")
+    )
+    return dt_local.strftime("%m/%d/%y %H:%M %Z")
+
+
+def format_pattern_cst(ts: int) -> str:
+    if ZoneInfo is None:
+        dt_utc = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
+        return dt_utc.strftime("%A %m/%d/%y %H:%M UTC")
+    dt_local = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc).astimezone(
+        ZoneInfo("America/Chicago")
+    )
+    return dt_local.strftime("%A %m/%d/%y %H:%M %Z")
+
+
 def normalize_row(source: SourceConfig, row: dict[str, Any]) -> Observation | None:
     pool = row.get("pool")
     if not isinstance(pool, dict):
@@ -3644,9 +3664,9 @@ def write_schedule_md(
     lines.append("# Recommended Liquidity Schedule")
     lines.append("")
     lines.append(
-        f"- Built from recurring high-yield windows observed before {iso_hour(end_ts)}"
+        f"- Built from recurring high-yield windows observed before {format_ts_cst(end_ts)}"
     )
-    lines.append("- Add liquidity at `next_add_utc`; remove at `next_remove_utc`.")
+    lines.append("- Add liquidity at `next_add_cst`; remove at `next_remove_cst`.")
     lines.append("")
 
     if not schedules:
@@ -3656,7 +3676,7 @@ def write_schedule_md(
         lines.append("## Top Schedule Blocks")
         lines.append("")
         lines.append(
-            "| Pool Rank | Version | Pair | Add Pattern (UTC) | Remove Pattern (UTC) | Next Add (UTC) | Next Remove (UTC) | Hit Rate % | Avg Block Hourly Yield % | Avg Block USD per $1k/hr | Block Hours |"
+            "| Pool Rank | Version | Pair | Add Pattern (CST) | Remove Pattern (CST) | Next Add (CST) | Next Remove (CST) | Hit Rate % | Avg Block Hourly Yield % | Avg Block USD per $1k/hr | Block Hours |"
         )
         lines.append(
             "|---:|---|---|---|---|---|---|---:|---:|---:|---:|"
@@ -3665,8 +3685,8 @@ def write_schedule_md(
             lines.append(
                 "| "
                 f"{schedule.pool_rank} | {schedule.version} | {schedule.pair} | "
-                f"{schedule.add_pattern_utc} | {schedule.remove_pattern_utc} | "
-                f"{iso_hour(schedule.next_add_ts)} | {iso_hour(schedule.next_remove_ts)} | "
+                f"{format_pattern_cst(schedule.next_add_ts)} | {format_pattern_cst(schedule.next_remove_ts)} | "
+                f"{format_ts_cst(schedule.next_add_ts)} | {format_ts_cst(schedule.next_remove_ts)} | "
                 f"{schedule.reliability_hit_rate_pct:.2f} | {schedule.avg_block_hourly_yield_pct:.6f} | "
                 f"{usd_per_1000_from_yield_pct(schedule.avg_block_hourly_yield_pct):.6f} | "
                 f"{schedule.block_hours} |"
@@ -4003,8 +4023,7 @@ def write_report_html(
     top_rankings = rankings[:top_n]
     top_schedules = schedules[:top_n]
     now_ts = int(time.time())
-    generated_ts = iso_hour(now_ts)
-    generated_local_ts = iso_hour_local(now_ts, local_timezone)
+    generated_ts = format_ts_cst(now_ts)
     jump_now_rows = select_jump_now_schedules(
         schedules=schedules,
         now_ts=now_ts,
@@ -4039,8 +4058,8 @@ def write_report_html(
             f"<td>{row.avg_hourly_fees_usd:.2f}</td>"
             f"<td>{row.total_fees_usd:.2f}</td>"
             f"<td>{row.observed_hours}</td>"
-            f"<td>{html.escape(iso_hour(row.fee_period_start_ts))}</td>"
-            f"<td>{html.escape(iso_hour(row.fee_period_end_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.fee_period_start_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.fee_period_end_ts))}</td>"
             f"<td>{row.avg_hourly_yield_pct:.6f}</td>"
             f"<td>{row.median_hourly_yield_pct:.6f}</td>"
             f"<td>{row.trimmed_mean_hourly_yield_pct:.6f}</td>"
@@ -4048,9 +4067,9 @@ def write_report_html(
             f"<td>{usd_per_1000_from_yield_pct(row.median_hourly_yield_pct):.6f}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.trimmed_mean_hourly_yield_pct):.6f}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.p90_hourly_yield_pct):.6f}</td>"
-            f"<td>{html.escape(row.best_window_utc)}</td>"
-            f"<td>{html.escape(iso_hour(row.best_window_start_ts))}</td>"
-            f"<td>{html.escape(iso_hour(row.best_window_end_ts))}</td>"
+            f"<td>{html.escape(format_pattern_cst(row.best_window_start_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.best_window_start_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.best_window_end_ts))}</td>"
             "</tr>"
         )
 
@@ -4064,12 +4083,10 @@ def write_report_html(
             f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.version)}</td>"
-            f"<td>{html.escape(row.add_pattern_utc)}</td>"
-            f"<td>{html.escape(row.remove_pattern_utc)}</td>"
-            f"<td>{html.escape(iso_hour(row.next_add_ts))}</td>"
-            f"<td>{html.escape(iso_hour_local(row.next_add_ts, local_timezone))}</td>"
-            f"<td>{html.escape(iso_hour(row.next_remove_ts))}</td>"
-            f"<td>{html.escape(iso_hour_local(row.next_remove_ts, local_timezone))}</td>"
+            f"<td>{html.escape(format_pattern_cst(row.next_add_ts))}</td>"
+            f"<td>{html.escape(format_pattern_cst(row.next_remove_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_add_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_remove_ts))}</td>"
             f"<td>{row.reliability_hit_rate_pct:.2f}</td>"
             f"<td>{row.avg_block_hourly_yield_pct:.6f}</td>"
             f"<td>{row.block_hours}</td>"
@@ -4089,10 +4106,8 @@ def write_report_html(
             f"<td>{html.escape(row.chain)}</td>"
             f"<td>{html.escape(status)}</td>"
             f"<td>{html.escape(format_eta(eta_seconds))}</td>"
-            f"<td>{html.escape(iso_hour(row.next_add_ts))}</td>"
-            f"<td>{html.escape(iso_hour_local(row.next_add_ts, local_timezone))}</td>"
-            f"<td>{html.escape(iso_hour(row.next_remove_ts))}</td>"
-            f"<td>{html.escape(iso_hour_local(row.next_remove_ts, local_timezone))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_add_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_remove_ts))}</td>"
             f"<td>{row.reliability_hit_rate_pct:.2f}</td>"
             f"<td>{row.avg_block_hourly_yield_pct:.6f}</td>"
             "</tr>"
@@ -4102,10 +4117,10 @@ def write_report_html(
         "<tr><td colspan='25'>No ranked pools found.</td></tr>"
     )
     schedules_table_html = "\n".join(schedule_rows) if schedule_rows else (
-        "<tr><td colspan='14'>No reliable recurring schedule blocks found.</td></tr>"
+        "<tr><td colspan='12'>No reliable recurring schedule blocks found.</td></tr>"
     )
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
-        "<tr><td colspan='14'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
+        "<tr><td colspan='12'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
     top_llama_rows = llama_rows[: max(0, v2_spike_top)]
     llama_rows_html = []
@@ -4130,8 +4145,7 @@ def write_report_html(
             f"<td>{html.escape(row.token1)}</td>"
             f"<td>{html.escape(row.token0_symbol)}</td>"
             f"<td>{html.escape(row.token1_symbol)}</td>"
-            f"<td>{html.escape(row.hour_start_utc)}</td>"
-            f"<td>{html.escape(row.hour_start_chicago)}</td>"
+            f"<td>{html.escape(format_ts_cst(row.hour_start_unix))}</td>"
             f"<td>{row.swap_count}</td>"
             f"<td>{row.weth_fee_normalized:.8f}</td>"
             f"<td>{row.weth_reserve_normalized:.8f}</td>"
@@ -4153,7 +4167,7 @@ def write_report_html(
             if llama_diagnostics is not None
             else "No V2 fee-yield spike rows matched adaptive threshold and persistence filters."
         )
-        llama_table_html = f"<tr><td colspan='24'>{empty_text}</td></tr>"
+        llama_table_html = f"<tr><td colspan='23'>{empty_text}</td></tr>"
     llama_endpoint_note = "<br/>".join(
         f"{html.escape(src.name)}: <code>{html.escape(src.endpoint)}</code>" for src in llama_sources
     )
@@ -4184,10 +4198,7 @@ def write_report_html(
             f"v2SeedState next/total={('n/a' if d.seed_next_index is None else d.seed_next_index)}/"
             f"{('n/a' if d.seed_total is None else d.seed_total)}, "
             f"seedLastBlock={('n/a' if d.seed_last_block is None else d.seed_last_block)}.<br/>"
-            f"Window UTC: {html.escape(iso_hour(d.window_start_ts))} -> {html.escape(iso_hour(d.window_end_ts))}; "
-            f"Window {html.escape(d.local_timezone)}: "
-            f"{html.escape(iso_hour_local(d.window_start_ts, d.local_timezone))} -> "
-            f"{html.escape(iso_hour_local(d.window_end_ts, d.local_timezone))}.<br/>"
+            f"Window (CST): {html.escape(format_ts_cst(d.window_start_ts))} -> {html.escape(format_ts_cst(d.window_end_ts))}.<br/>"
             "Dropoff counts: "
             f"fetched={d.counts.fetched_raw_rows}, "
             f"after_window={d.counts.after_time_window_filter}, "
@@ -4305,11 +4316,10 @@ def write_report_html(
     <section class="header">
       <h1>Uniswap Yield & Liquidity Schedule Report</h1>
       <div class="meta">
-        <div><strong>Generated (UTC):</strong> {html.escape(generated_ts)}</div>
-        <div><strong>Generated ({html.escape(local_timezone)}):</strong> {html.escape(generated_local_ts)}</div>
+        <div><strong>Generated (CST):</strong> {html.escape(generated_ts)}</div>
         <div><strong>Sources Scanned:</strong> {source_count}</div>
-        <div><strong>Analysis Window Start:</strong> {html.escape(iso_hour(start_ts))}</div>
-        <div><strong>Analysis Window End:</strong> {html.escape(iso_hour(end_ts))}</div>
+        <div><strong>Analysis Window Start (CST):</strong> {html.escape(format_ts_cst(start_ts))}</div>
+        <div><strong>Analysis Window End (CST):</strong> {html.escape(format_ts_cst(end_ts))}</div>
         <div><strong>Pools Ranked:</strong> {len(rankings)}</div>
         <div><strong>Schedule Blocks:</strong> {len(schedules)}</div>
         <div><strong>Quality Input Rows:</strong> {quality_input_rows}</div>
@@ -4339,7 +4349,7 @@ def write_report_html(
           <thead>
             <tr>
               <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Status</th>
-              <th>ETA</th><th>Next Add UTC</th><th>Next Add Local</th><th>Next Remove UTC</th><th>Next Remove Local</th>
+              <th>ETA</th><th>Next Add (CST)</th><th>Next Remove (CST)</th>
               <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th>
             </tr>
           </thead>
@@ -4368,7 +4378,7 @@ def write_report_html(
             <tr>
               <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Source</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
               <th>Token0 Symbol</th><th>Token1 Symbol</th>
-              <th>Hour UTC</th><th>Hour Chicago</th><th>Swap Count</th>
+              <th>Hour (CST)</th><th>Swap Count</th>
               <th>feeWETH (normalized)</th><th>reserveWETH (normalized)</th><th>Score</th><th>Hourly Yield %</th><th>Rough APR %</th>
               <th>Baseline Median Score</th><th>Spike Multiplier</th><th>Spike Multiplier (Capped)</th><th>Persistence Hits</th><th>Flags</th>
             </tr>
@@ -4398,10 +4408,10 @@ def write_report_html(
               <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Pair</th><th>Fee Tier</th>
               <th>Avg TVL USD</th><th>Outlier Hours</th>
               <th>Avg Hourly Fee USD</th><th>Total Fees USD</th><th>Obs Hours</th>
-              <th>Fee Period Start UTC</th><th>Fee Period End UTC</th>
+              <th>Fee Period Start (CST)</th><th>Fee Period End (CST)</th>
               <th>Avg Hourly Yield %</th><th>Median Hourly Yield %</th><th>Trimmed Mean Hourly Yield %</th><th>P90 Hourly Yield %</th>
               <th>Median USD per $1k / hr</th><th>Trimmed Mean USD per $1k / hr</th><th>P90 USD per $1k / hr</th>
-              <th>Best Window Pattern</th><th>Best Window Start UTC</th><th>Best Window End UTC</th>
+              <th>Best Window Pattern (CST)</th><th>Best Window Start (CST)</th><th>Best Window End (CST)</th>
             </tr>
           </thead>
           <tbody>
@@ -4421,8 +4431,8 @@ def write_report_html(
           <thead>
             <tr>
               <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th>
-              <th>Add Pattern UTC</th><th>Remove Pattern UTC</th>
-              <th>Next Add UTC</th><th>Next Add Local</th><th>Next Remove UTC</th><th>Next Remove Local</th>
+              <th>Add Pattern (CST)</th><th>Remove Pattern (CST)</th>
+              <th>Next Add (CST)</th><th>Next Remove (CST)</th>
               <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th><th>Block Hours</th>
             </tr>
           </thead>
@@ -4496,7 +4506,7 @@ def write_summary_md(
     lines.append("# Uniswap Yield Potential Report")
     lines.append("")
     lines.append(f"- Sources scanned: {source_count}")
-    lines.append(f"- Analysis window: {iso_hour(start_ts)} to {iso_hour(end_ts)}")
+    lines.append(f"- Analysis window (CST): {format_ts_cst(start_ts)} to {format_ts_cst(end_ts)}")
     lines.append(f"- Pools ranked: {len(rankings)}")
     lines.append("- Fee columns are based on hourly buckets (`poolHourDatas`):")
     lines.append("  - `avg_hourly_fees_usd` = mean fee per 1-hour bucket.")
@@ -4509,7 +4519,7 @@ def write_summary_md(
         lines.append("## Top Pools by Earning Potential")
         lines.append("")
         lines.append(
-            "| Rank | Version | Chain | Pair | Fee Tier | Avg TVL USD | Outlier Hours | Avg Hourly Fee USD | Total Fees USD | Fee Obs Hours | Fee Period (UTC) | Avg Hourly Yield % | Median Hourly Yield % | Trimmed Mean Hourly Yield % | P90 Hourly Yield % | Avg USD per $1k / hr | Median USD per $1k / hr | Trimmed Mean USD per $1k / hr | P90 USD per $1k / hr | Best Window Pattern | Best Window Start (UTC) | Best Window End (UTC) |"
+            "| Rank | Version | Chain | Pair | Fee Tier | Avg TVL USD | Outlier Hours | Avg Hourly Fee USD | Total Fees USD | Fee Obs Hours | Fee Period (CST) | Avg Hourly Yield % | Median Hourly Yield % | Trimmed Mean Hourly Yield % | P90 Hourly Yield % | Avg USD per $1k / hr | Median USD per $1k / hr | Trimmed Mean USD per $1k / hr | P90 USD per $1k / hr | Best Window Pattern (CST) | Best Window Start (CST) | Best Window End (CST) |"
         )
         lines.append(
             "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"
@@ -4520,14 +4530,14 @@ def write_summary_md(
                 f"{idx} | {row.version} | {row.chain} | {row.pair} | {row.fee_tier} | "
                 f"{row.avg_tvl_usd:.2f} | {row.outlier_hours} | "
                 f"{row.avg_hourly_fees_usd:.2f} | {row.total_fees_usd:.2f} | {row.observed_hours} | "
-                f"{iso_hour(row.fee_period_start_ts)} to {iso_hour(row.fee_period_end_ts)} | "
+                f"{format_ts_cst(row.fee_period_start_ts)} to {format_ts_cst(row.fee_period_end_ts)} | "
                 f"{row.avg_hourly_yield_pct:.6f} | {row.median_hourly_yield_pct:.6f} | "
                 f"{row.trimmed_mean_hourly_yield_pct:.6f} | {row.p90_hourly_yield_pct:.6f} | "
                 f"{usd_per_1000_from_yield_pct(row.avg_hourly_yield_pct):.6f} | "
                 f"{usd_per_1000_from_yield_pct(row.median_hourly_yield_pct):.6f} | "
                 f"{usd_per_1000_from_yield_pct(row.trimmed_mean_hourly_yield_pct):.6f} | "
                 f"{usd_per_1000_from_yield_pct(row.p90_hourly_yield_pct):.6f} | "
-                f"{row.best_window_utc} | {iso_hour(row.best_window_start_ts)} | {iso_hour(row.best_window_end_ts)} |"
+                f"{format_pattern_cst(row.best_window_start_ts)} | {format_ts_cst(row.best_window_start_ts)} | {format_ts_cst(row.best_window_end_ts)} |"
             )
 
     with path.open("w", encoding="utf-8") as f:
