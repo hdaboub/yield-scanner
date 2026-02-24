@@ -547,6 +547,48 @@ class AnalyticsTests(unittest.TestCase):
         assert obs is not None
         self.assertEqual(obs.pair, "DAI/WETH")
 
+    def test_quality_filter_rejects_high_implied_fee_rate_for_non_v2_spike(self) -> None:
+        rows = [
+            Observation(
+                source_name="uniswap-v4-mainnet-official",
+                version="v4",
+                chain="ethereum",
+                pool_id="pool-1",
+                pair="ETH/USDC",
+                fee_tier=999610,
+                ts=1700000000,
+                volume_usd=1000.0,
+                tvl_usd=50000.0,
+                fees_usd=500.0,
+                hourly_yield=0.01,
+            ),
+            Observation(
+                source_name="sushi-v2-fee-spikes-mainnet",
+                version="v2",
+                chain="ethereum",
+                pool_id="pool-2",
+                pair="DAI/WETH",
+                fee_tier=3000,
+                ts=1700000000,
+                volume_usd=1000.0,
+                tvl_usd=50000.0,
+                fees_usd=500.0,
+                hourly_yield=0.01,
+            ),
+        ]
+        filtered, rejected = scanner.filter_observations_with_quality_audit(
+            observations=rows,
+            min_tvl_usd=0.0,
+            max_hourly_yield_pct=None,
+            v2_spike_sources={"sushi-v2-fee-spikes-mainnet"},
+        )
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].source_name, "sushi-v2-fee-spikes-mainnet")
+        self.assertEqual(
+            rejected.get(("uniswap-v4-mainnet-official", "v4", "ethereum", "implied_fee_rate_gt_10pct")),
+            1,
+        )
+
     def test_build_liquidity_schedule_finds_reliable_recurring_block(self) -> None:
         start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())
         rows = []

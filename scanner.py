@@ -1234,6 +1234,13 @@ def classify_quality_rejection(
         return "fees_gt_volume"
     if (
         not is_v2_spike
+        and obs.fees_usd is not None
+        and obs.volume_usd > 0
+        and (obs.fees_usd / obs.volume_usd) > 0.10
+    ):
+        return "implied_fee_rate_gt_10pct"
+    if (
+        not is_v2_spike
         and
         obs.fees_usd is not None
         and obs.volume_usd > 0
