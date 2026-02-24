@@ -3704,10 +3704,11 @@ def write_report_html(
         ranking_rows.append(
             "<tr>"
             f"<td>{idx}</td>"
+            f"<td>{usd_per_1000_from_yield_pct(row.avg_hourly_yield_pct):.6f}</td>"
+            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.version)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
             f"<td>{row.fee_tier}</td>"
             f"<td>{row.avg_tvl_usd:.2f}</td>"
@@ -3721,7 +3722,6 @@ def write_report_html(
             f"<td>{row.median_hourly_yield_pct:.6f}</td>"
             f"<td>{row.trimmed_mean_hourly_yield_pct:.6f}</td>"
             f"<td>{row.p90_hourly_yield_pct:.6f}</td>"
-            f"<td>{usd_per_1000_from_yield_pct(row.avg_hourly_yield_pct):.6f}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.median_hourly_yield_pct):.6f}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.trimmed_mean_hourly_yield_pct):.6f}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.p90_hourly_yield_pct):.6f}</td>"
@@ -3737,10 +3737,10 @@ def write_report_html(
         schedule_rows.append(
             "<tr>"
             f"<td>{row.pool_rank}</td>"
+            f"<td>{usd_per_1000_from_yield_pct(row.avg_block_hourly_yield_pct):.6f}</td>"
+            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.version)}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.add_pattern_utc)}</td>"
             f"<td>{html.escape(row.remove_pattern_utc)}</td>"
             f"<td>{html.escape(iso_hour(row.next_add_ts))}</td>"
@@ -3749,7 +3749,6 @@ def write_report_html(
             f"<td>{html.escape(iso_hour_local(row.next_remove_ts, local_timezone))}</td>"
             f"<td>{row.reliability_hit_rate_pct:.2f}</td>"
             f"<td>{row.avg_block_hourly_yield_pct:.6f}</td>"
-            f"<td>{usd_per_1000_from_yield_pct(row.avg_block_hourly_yield_pct):.6f}</td>"
             f"<td>{row.block_hours}</td>"
             "</tr>"
         )
@@ -3760,11 +3759,11 @@ def write_report_html(
         jump_rows.append(
             "<tr>"
             f"<td>{row.pool_rank}</td>"
+            f"<td>{usd_per_1000_from_yield_pct(row.avg_block_hourly_yield_pct):.6f}</td>"
+            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.version)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(status)}</td>"
             f"<td>{html.escape(format_eta(eta_seconds))}</td>"
             f"<td>{html.escape(iso_hour(row.next_add_ts))}</td>"
@@ -3773,7 +3772,6 @@ def write_report_html(
             f"<td>{html.escape(iso_hour_local(row.next_remove_ts, local_timezone))}</td>"
             f"<td>{row.reliability_hit_rate_pct:.2f}</td>"
             f"<td>{row.avg_block_hourly_yield_pct:.6f}</td>"
-            f"<td>{usd_per_1000_from_yield_pct(row.avg_block_hourly_yield_pct):.6f}</td>"
             "</tr>"
         )
 
@@ -3781,10 +3779,10 @@ def write_report_html(
         "<tr><td colspan='25'>No ranked pools found.</td></tr>"
     )
     schedules_table_html = "\n".join(schedule_rows) if schedule_rows else (
-        "<tr><td colspan='15'>No reliable recurring schedule blocks found.</td></tr>"
+        "<tr><td colspan='14'>No reliable recurring schedule blocks found.</td></tr>"
     )
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
-        "<tr><td colspan='15'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
+        "<tr><td colspan='14'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
     top_llama_rows = llama_rows[: max(0, v2_spike_top)]
     llama_rows_html = []
@@ -3798,10 +3796,11 @@ def write_report_html(
         llama_rows_html.append(
             "<tr>"
             f"<td>{idx}</td>"
+            f"<td>{row.usd_per_1000_liquidity_hourly:.6f}</td>"
+            f"<td>{html.escape(pool_name)}</td>"
             f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.source_name)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
-            f"<td>{html.escape(pool_name)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.token0)}</td>"
             f"<td>{html.escape(row.token1)}</td>"
@@ -3814,7 +3813,6 @@ def write_report_html(
             f"<td>{row.weth_reserve:.8f}</td>"
             f"<td>{row.score:.10f}</td>"
             f"<td>{row.hourly_yield_pct:.6f}</td>"
-            f"<td>{row.usd_per_1000_liquidity_hourly:.6f}</td>"
             f"<td>{row.rough_apr_pct:.4f}</td>"
             f"<td>{row.baseline_median_score:.10f}</td>"
             f"<td>{row.spike_multiplier:.4f}</td>"
@@ -4014,9 +4012,9 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Pool Rank</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Pool Name</th><th>Pair</th><th>Status</th>
+              <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Status</th>
               <th>ETA</th><th>Next Add UTC</th><th>Next Add Local</th><th>Next Remove UTC</th><th>Next Remove Local</th>
-              <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th><th>Avg USD per $1k / hr</th>
+              <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th>
             </tr>
           </thead>
           <tbody>
@@ -4042,10 +4040,10 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Rank</th><th>Exchange</th><th>Source</th><th>Chain</th><th>Pool Name</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
+              <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Source</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
               <th>Token0 Symbol</th><th>Token1 Symbol</th>
               <th>Hour UTC</th><th>Hour Chicago</th><th>Swap Count</th>
-              <th>feeWETH</th><th>reserveWETH</th><th>Score</th><th>Hourly Yield %</th><th>USD per $1k / hr</th><th>Rough APR %</th>
+              <th>feeWETH</th><th>reserveWETH</th><th>Score</th><th>Hourly Yield %</th><th>Rough APR %</th>
               <th>Baseline Median Score</th><th>Spike Multiplier</th><th>Persistence Hits</th><th>Flags</th>
             </tr>
           </thead>
@@ -4071,12 +4069,12 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Rank</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Pool Name</th><th>Pair</th><th>Fee Tier</th>
+              <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Pair</th><th>Fee Tier</th>
               <th>Avg TVL USD</th><th>Outlier Hours</th>
               <th>Avg Hourly Fee USD</th><th>Total Fees USD</th><th>Obs Hours</th>
               <th>Fee Period Start UTC</th><th>Fee Period End UTC</th>
               <th>Avg Hourly Yield %</th><th>Median Hourly Yield %</th><th>Trimmed Mean Hourly Yield %</th><th>P90 Hourly Yield %</th>
-              <th>Avg USD per $1k / hr</th><th>Median USD per $1k / hr</th><th>Trimmed Mean USD per $1k / hr</th><th>P90 USD per $1k / hr</th>
+              <th>Median USD per $1k / hr</th><th>Trimmed Mean USD per $1k / hr</th><th>P90 USD per $1k / hr</th>
               <th>Best Window Pattern</th><th>Best Window Start UTC</th><th>Best Window End UTC</th>
             </tr>
           </thead>
@@ -4096,10 +4094,10 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Pool Rank</th><th>Exchange</th><th>Version</th><th>Pool Name</th><th>Pair</th>
+              <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th>
               <th>Add Pattern UTC</th><th>Remove Pattern UTC</th>
               <th>Next Add UTC</th><th>Next Add Local</th><th>Next Remove UTC</th><th>Next Remove Local</th>
-              <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th><th>Avg USD per $1k / hr</th><th>Block Hours</th>
+              <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th><th>Block Hours</th>
             </tr>
           </thead>
           <tbody>
