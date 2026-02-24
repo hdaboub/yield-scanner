@@ -236,6 +236,51 @@ class LlamaSpikeRankingRow:
     notes_flags: str
 
 
+@dataclass(frozen=True)
+class LlamaDropoffCounters:
+    fetched_raw_rows: int
+    after_time_window_filter: int
+    after_min_swaps_filter: int
+    after_min_weth_filter: int
+    after_baseline_ready_filter: int
+    after_spike_multiplier_filter: int
+    after_persistence_filter: int
+    final_ranked_rows: int
+
+
+@dataclass(frozen=True)
+class LlamaRuntimeState:
+    meta_block_number: int | None
+    seed_next_index: int | None
+    seed_total: int | None
+    seed_last_block: int | None
+
+
+@dataclass(frozen=True)
+class LlamaRunDiagnostics:
+    endpoint: str
+    version: str
+    source_name: str
+    window_start_ts: int
+    window_end_ts: int
+    local_timezone: str
+    thresholds_label: str
+    min_swap_count: int | None
+    min_weth_liquidity: float | None
+    baseline_hours: int | None
+    persistence_hours: int | None
+    persistence_spike_multiplier: float | None
+    persistence_min_hits: int | None
+    fallback_trace: str
+    counts: LlamaDropoffCounters
+    meta_block_number: int | None
+    seed_next_index: int | None
+    seed_total: int | None
+    seed_last_block: int | None
+    empty_stage: str | None
+    empty_message: str
+
+
 def trimmed_mean(values: list[float], trim_ratio: float) -> float:
     if not values:
         return 0.0
@@ -1118,6 +1163,23 @@ query TokenMeta($ids: [String!]!) {
 """
 
 
+LLAMA_RUNTIME_QUERY = """
+query LlamaRuntime {
+  _meta {
+    block {
+      number
+    }
+  }
+  v2SeedStates {
+    id
+    nextIndex
+    total
+    lastBlock
+  }
+}
+"""
+
+
 def _extract_pair_id(value: Any) -> str:
     if isinstance(value, dict):
         nested = value.get("id")
@@ -1209,6 +1271,138 @@ def _fetch_v2_token_metadata(
     return out
 
 
+def fetch_llama_runtime_state(
+    source: SourceConfig,
+    timeout: int,
+    retries: int,
+) -> LlamaRuntimeState:
+    try:
+        data = graphql_query(
+            source=source,
+            query=LLAMA_RUNTIME_QUERY,
+            variables={},
+            timeout=timeout,
+            retries=retries,
+        )
+    except Exception:  # noqa: BLE001
+        return LlamaRuntimeState(
+            meta_block_number=None,
+            seed_next_index=None,
+            seed_total=None,
+            seed_last_block=None,
+        )
+
+    meta_block: int | None = None
+    meta = data.get("_meta")
+    if isinstance(meta, dict):
+        block = meta.get("block")
+        if isinstance(block, dict):
+            raw_number = block.get("number")
+            if raw_number is not None:
+                meta_block = to_int(raw_number, default=0) or None
+
+    seed_next: int | None = None
+    seed_total: int | None = None
+    seed_last_block: int | None = None
+    seed_states = data.get("v2SeedStates")
+    if isinstance(seed_states, list) and seed_states:
+        picked: dict[str, Any] | None = None
+        for item in seed_states:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("id", "")).lower() == "v2":
+                picked = item
+                break
+            if picked is None:
+                picked = item
+        if picked is not None:
+            seed_next = to_int(picked.get("nextIndex"), default=0) or None
+            seed_total = to_int(picked.get("total"), default=0) or None
+            seed_last_block = to_int(picked.get("lastBlock"), default=0) or None
+
+    return LlamaRuntimeState(
+        meta_block_number=meta_block,
+        seed_next_index=seed_next,
+        seed_total=seed_total,
+        seed_last_block=seed_last_block,
+    )
+
+
+def summarize_llama_dropoff(counts: LlamaDropoffCounters) -> tuple[str | None, str]:
+    stages = [
+        ("fetched_raw_rows", counts.fetched_raw_rows),
+        ("after_time_window_filter", counts.after_time_window_filter),
+        ("after_min_swaps_filter", counts.after_min_swaps_filter),
+        ("after_min_weth_filter", counts.after_min_weth_filter),
+        ("after_baseline_ready_filter", counts.after_baseline_ready_filter),
+        ("after_spike_multiplier_filter", counts.after_spike_multiplier_filter),
+        ("after_persistence_filter", counts.after_persistence_filter),
+        ("final_ranked_rows", counts.final_ranked_rows),
+    ]
+    if counts.fetched_raw_rows <= 0:
+        return (
+            "fetched_raw_rows",
+            "No PairHourData rows returned from llama for the queried window (0 fetched).",
+        )
+    for idx in range(1, len(stages)):
+        prev_name, prev_value = stages[idx - 1]
+        cur_name, cur_value = stages[idx]
+        if prev_value > 0 and cur_value == 0:
+            return (
+                cur_name,
+                (
+                    "Rows fetched from llama but all were filtered out "
+                    f"(drop to 0 at {cur_name} after {prev_name}={prev_value})."
+                ),
+            )
+    if counts.final_ranked_rows <= 0:
+        return (
+            "final_ranked_rows",
+            "Rows fetched from llama but all were filtered out before final ranking.",
+        )
+    return (None, "Llama pipeline produced ranked rows.")
+
+
+def build_llama_diagnostics(
+    *,
+    source: SourceConfig | None,
+    runtime: LlamaRuntimeState | None,
+    window_start_ts: int,
+    window_end_ts: int,
+    local_timezone: str,
+    thresholds: LlamaAdaptiveThresholds | None,
+    counts: LlamaDropoffCounters,
+) -> LlamaRunDiagnostics | None:
+    if source is None:
+        return None
+    empty_stage, empty_message = summarize_llama_dropoff(counts)
+    return LlamaRunDiagnostics(
+        endpoint=source.endpoint,
+        version=source.version,
+        source_name=source.name,
+        window_start_ts=window_start_ts,
+        window_end_ts=window_end_ts,
+        local_timezone=local_timezone,
+        thresholds_label=(thresholds.band if thresholds is not None else "unavailable"),
+        min_swap_count=(thresholds.min_swap_count if thresholds is not None else None),
+        min_weth_liquidity=(thresholds.min_weth_liquidity if thresholds is not None else None),
+        baseline_hours=(thresholds.baseline_hours if thresholds is not None else None),
+        persistence_hours=(thresholds.persistence_hours if thresholds is not None else None),
+        persistence_spike_multiplier=(
+            thresholds.persistence_spike_multiplier if thresholds is not None else None
+        ),
+        persistence_min_hits=(thresholds.persistence_min_hits if thresholds is not None else None),
+        fallback_trace=(thresholds.fallback_trace if thresholds is not None else ""),
+        counts=counts,
+        meta_block_number=(runtime.meta_block_number if runtime is not None else None),
+        seed_next_index=(runtime.seed_next_index if runtime is not None else None),
+        seed_total=(runtime.seed_total if runtime is not None else None),
+        seed_last_block=(runtime.seed_last_block if runtime is not None else None),
+        empty_stage=empty_stage,
+        empty_message=empty_message,
+    )
+
+
 def choose_llama_adaptive_thresholds(
     total_rows: int,
     min_swap_count_floor: int,
@@ -1245,7 +1439,7 @@ def fetch_llama_pair_hour_rows(
     max_pages: int | None,
     timeout: int,
     retries: int,
-) -> list[LlamaPairHourRow]:
+) -> tuple[list[LlamaPairHourRow], int]:
     cursor_end = end_ts - 1
     pages = 0
     raw_rows: list[dict[str, Any]] = []
@@ -1359,15 +1553,22 @@ def fetch_llama_pair_hour_rows(
             )
         )
     output.sort(key=lambda r: (r.hour_start_unix, r.pair))
-    return output
+    return output, len(raw_rows)
 
 
 def build_llama_spike_rankings(
     rows: Iterable[LlamaPairHourRow],
     thresholds: LlamaAdaptiveThresholds,
-) -> list[LlamaSpikeRankingRow]:
+) -> tuple[list[LlamaSpikeRankingRow], LlamaDropoffCounters]:
     grouped: dict[tuple[str, str], list[LlamaPairHourRow]] = defaultdict(list)
-    for row in rows:
+    fetched_rows = list(rows)
+    after_time_window = len(fetched_rows)
+    after_min_swaps = 0
+    after_min_weth = 0
+    after_baseline_ready = 0
+    after_spike_multiplier = 0
+    after_persistence = 0
+    for row in fetched_rows:
         if row.score is None or row.weth_reserve is None or row.weth_fee is None:
             continue
         grouped[(row.source_name, row.pair)].append(row)
@@ -1418,7 +1619,16 @@ def build_llama_spike_rankings(
                 and row.reserve0 > 0
                 and row.reserve1 > 0
             )
+            if row.swap_count >= thresholds.min_swap_count:
+                after_min_swaps += 1
+            if row.swap_count >= thresholds.min_swap_count and (row.weth_reserve or 0.0) >= thresholds.min_weth_liquidity:
+                after_min_weth += 1
+            if baseline_median > 0:
+                after_baseline_ready += 1
+            if qualifies and is_spike:
+                after_spike_multiplier += 1
             if qualifies and persistence_hits >= thresholds.persistence_min_hits:
+                after_persistence += 1
                 ranked.append(
                     LlamaSpikeRankingRow(
                         source_name=row.source_name,
@@ -1450,7 +1660,17 @@ def build_llama_spike_rankings(
         key=lambda r: (r.spike_multiplier, r.score, r.persistence_hits, r.weth_reserve),
         reverse=True,
     )
-    return ranked
+    counters = LlamaDropoffCounters(
+        fetched_raw_rows=after_time_window,
+        after_time_window_filter=after_time_window,
+        after_min_swaps_filter=after_min_swaps,
+        after_min_weth_filter=after_min_weth,
+        after_baseline_ready_filter=after_baseline_ready,
+        after_spike_multiplier_filter=after_spike_multiplier,
+        after_persistence_filter=after_persistence,
+        final_ranked_rows=len(ranked),
+    )
+    return ranked, counters
 
 
 def build_llama_rankings_with_fallback(
@@ -1466,7 +1686,7 @@ def build_llama_rankings_with_fallback(
     strict_min_swap_count: int,
     strict_min_weth_liquidity: float,
     min_ranked_target: int,
-) -> tuple[list[LlamaSpikeRankingRow], LlamaAdaptiveThresholds]:
+) -> tuple[list[LlamaSpikeRankingRow], LlamaAdaptiveThresholds, LlamaDropoffCounters]:
     target = max(1, int(min_ranked_target))
     tiers: list[tuple[int, float, str]] = []
     if strict_mode:
@@ -1490,6 +1710,7 @@ def build_llama_rankings_with_fallback(
 
     trace: list[str] = []
     final_ranked: list[LlamaSpikeRankingRow] = []
+    final_counters = LlamaDropoffCounters(0, 0, 0, 0, 0, 0, 0, 0)
     selected_thresholds: LlamaAdaptiveThresholds | None = None
     for idx, (min_swaps, min_weth, label) in enumerate(uniq_tiers):
         thresholds = choose_llama_adaptive_thresholds(
@@ -1504,9 +1725,10 @@ def build_llama_rankings_with_fallback(
             fallback_engaged=idx > 0,
             fallback_trace="",
         )
-        ranked = build_llama_spike_rankings(rows, thresholds)
+        ranked, counters = build_llama_spike_rankings(rows, thresholds)
         trace.append(f"{label}:{min_weth:.0f}/{min_swaps}->{len(ranked)}")
         final_ranked = ranked
+        final_counters = counters
         selected_thresholds = thresholds
         if len(ranked) >= target:
             break
@@ -1524,7 +1746,7 @@ def build_llama_rankings_with_fallback(
         fallback_engaged=("fallback" in selected_thresholds.band) or strict_mode,
         fallback_trace=fallback_trace,
     )
-    return final_ranked, selected_thresholds
+    return final_ranked, selected_thresholds, final_counters
 
 
 def fetch_v2_spike_observations(
@@ -3338,6 +3560,88 @@ def write_llama_spike_csv(
             )
 
 
+def write_llama_diagnostics_csv(path: Path, diagnostics: LlamaRunDiagnostics | None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "source_name",
+                "version",
+                "endpoint",
+                "meta_block_number",
+                "seed_next_index",
+                "seed_total",
+                "seed_last_block",
+                "window_start_utc",
+                "window_end_utc",
+                "window_start_local",
+                "window_end_local",
+                "thresholds_label",
+                "min_swap_count",
+                "min_weth_liquidity",
+                "baseline_hours",
+                "persistence_hours",
+                "persistence_spike_multiplier",
+                "persistence_min_hits",
+                "fallback_trace",
+                "fetched_raw_rows",
+                "after_time_window_filter",
+                "after_min_swaps_filter",
+                "after_min_weth_filter",
+                "after_baseline_ready_filter",
+                "after_spike_multiplier_filter",
+                "after_persistence_filter",
+                "final_ranked_rows",
+                "empty_stage",
+                "empty_message",
+            ]
+        )
+        if diagnostics is None:
+            return
+        writer.writerow(
+            [
+                diagnostics.source_name,
+                diagnostics.version,
+                diagnostics.endpoint,
+                diagnostics.meta_block_number,
+                diagnostics.seed_next_index,
+                diagnostics.seed_total,
+                diagnostics.seed_last_block,
+                iso_hour(diagnostics.window_start_ts),
+                iso_hour(diagnostics.window_end_ts),
+                iso_hour_local(diagnostics.window_start_ts, diagnostics.local_timezone),
+                iso_hour_local(diagnostics.window_end_ts, diagnostics.local_timezone),
+                diagnostics.thresholds_label,
+                diagnostics.min_swap_count,
+                (
+                    f"{diagnostics.min_weth_liquidity:.6f}"
+                    if diagnostics.min_weth_liquidity is not None
+                    else ""
+                ),
+                diagnostics.baseline_hours,
+                diagnostics.persistence_hours,
+                (
+                    f"{diagnostics.persistence_spike_multiplier:.6f}"
+                    if diagnostics.persistence_spike_multiplier is not None
+                    else ""
+                ),
+                diagnostics.persistence_min_hits,
+                diagnostics.fallback_trace,
+                diagnostics.counts.fetched_raw_rows,
+                diagnostics.counts.after_time_window_filter,
+                diagnostics.counts.after_min_swaps_filter,
+                diagnostics.counts.after_min_weth_filter,
+                diagnostics.counts.after_baseline_ready_filter,
+                diagnostics.counts.after_spike_multiplier_filter,
+                diagnostics.counts.after_persistence_filter,
+                diagnostics.counts.final_ranked_rows,
+                diagnostics.empty_stage,
+                diagnostics.empty_message,
+            ]
+        )
+
+
 def write_report_html(
     path: Path,
     rankings: list[PoolRanking],
@@ -3346,6 +3650,7 @@ def write_report_html(
     llama_rows: list[LlamaSpikeRankingRow],
     llama_thresholds: LlamaAdaptiveThresholds | None,
     llama_sources: list[SourceConfig],
+    llama_diagnostics: LlamaRunDiagnostics | None,
     v2_spike_top: int,
     top_n: int,
     start_ts: int,
@@ -3487,9 +3792,15 @@ def write_report_html(
             f"<td>{html.escape(row.notes_flags)}</td>"
             "</tr>"
         )
-    llama_table_html = "\n".join(llama_rows_html) if llama_rows_html else (
-        "<tr><td colspan='21'>No V2 fee-yield spike rows matched adaptive threshold and persistence filters.</td></tr>"
-    )
+    if llama_rows_html:
+        llama_table_html = "\n".join(llama_rows_html)
+    else:
+        empty_text = (
+            html.escape(llama_diagnostics.empty_message)
+            if llama_diagnostics is not None
+            else "No V2 fee-yield spike rows matched adaptive threshold and persistence filters."
+        )
+        llama_table_html = f"<tr><td colspan='21'>{empty_text}</td></tr>"
     llama_endpoint_note = "<br/>".join(
         f"{html.escape(src.name)}: <code>{html.escape(src.endpoint)}</code>" for src in llama_sources
     )
@@ -3510,6 +3821,32 @@ def write_report_html(
         )
         if llama_thresholds.fallback_trace:
             llama_threshold_note += f" Fallback path: {html.escape(llama_thresholds.fallback_trace)}."
+    llama_diag_banner = ""
+    if llama_diagnostics is not None:
+        d = llama_diagnostics
+        llama_diag_banner = (
+            "<p class='note'>"
+            "<strong>Llama Diagnostics:</strong> "
+            f"meta.block={('n/a' if d.meta_block_number is None else d.meta_block_number)}, "
+            f"v2SeedState next/total={('n/a' if d.seed_next_index is None else d.seed_next_index)}/"
+            f"{('n/a' if d.seed_total is None else d.seed_total)}, "
+            f"seedLastBlock={('n/a' if d.seed_last_block is None else d.seed_last_block)}.<br/>"
+            f"Window UTC: {html.escape(iso_hour(d.window_start_ts))} -> {html.escape(iso_hour(d.window_end_ts))}; "
+            f"Window {html.escape(d.local_timezone)}: "
+            f"{html.escape(iso_hour_local(d.window_start_ts, d.local_timezone))} -> "
+            f"{html.escape(iso_hour_local(d.window_end_ts, d.local_timezone))}.<br/>"
+            "Dropoff counts: "
+            f"fetched={d.counts.fetched_raw_rows}, "
+            f"after_window={d.counts.after_time_window_filter}, "
+            f"after_min_swaps={d.counts.after_min_swaps_filter}, "
+            f"after_min_weth={d.counts.after_min_weth_filter}, "
+            f"after_baseline={d.counts.after_baseline_ready_filter}, "
+            f"after_spike={d.counts.after_spike_multiplier_filter}, "
+            f"after_persistence={d.counts.after_persistence_filter}, "
+            f"final={d.counts.final_ranked_rows}.<br/>"
+            f"Status: {html.escape(d.empty_message)}"
+            "</p>"
+        )
 
     doc = f"""<!doctype html>
 <html lang="en">
@@ -3633,6 +3970,7 @@ def write_report_html(
         <a href="sushi_v2_yield_spikes.csv">sushi_v2_yield_spikes.csv</a>
         <a href="llama_pair_hour_data.csv">llama_pair_hour_data.csv</a>
         <a href="llama_weth_spike_rankings.csv">llama_weth_spike_rankings.csv</a>
+        <a href="llama_run_diagnostics.csv">llama_run_diagnostics.csv</a>
         <a href="data_quality_audit.csv">data_quality_audit.csv</a>
       </div>
     </section>
@@ -3669,6 +4007,7 @@ def write_report_html(
       <p class="note">
         Ranked by spike-vs-baseline (primary) and score (secondary), where score = feeWETH / reserveWETH from PairHourData.
       </p>
+      {llama_diag_banner}
       <div class="table-wrap">
         <table>
           <thead>
@@ -4018,9 +4357,11 @@ def main() -> int:
     )
     llama_sources = [source for source in sources if source.source_type == "v2_spike"]
     llama_pair_hour_rows: list[LlamaPairHourRow] = []
+    llama_fetched_raw_rows = 0
+    llama_runtime_state: LlamaRuntimeState | None = None
     for source in llama_sources:
         try:
-            source_rows = fetch_llama_pair_hour_rows(
+            source_rows, source_raw_count = fetch_llama_pair_hour_rows(
                 source=source,
                 start_ts=start_ts,
                 end_ts=end_ts,
@@ -4029,9 +4370,19 @@ def main() -> int:
                 timeout=args.timeout,
                 retries=args.retries,
             )
+            if llama_runtime_state is None:
+                llama_runtime_state = fetch_llama_runtime_state(
+                    source=source,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                )
             llama_pair_hour_rows.extend(source_rows)
+            llama_fetched_raw_rows += source_raw_count
             print(
-                f"{source.name}: fetched {len(source_rows):,} llama PairHourData rows for report output.",
+                (
+                    f"{source.name}: fetched {len(source_rows):,} llama PairHourData rows "
+                    f"for report output ({source_raw_count:,} raw)."
+                ),
                 file=sys.stderr,
             )
         except Exception as err:  # noqa: BLE001
@@ -4041,8 +4392,9 @@ def main() -> int:
             )
     llama_thresholds: LlamaAdaptiveThresholds | None = None
     llama_rankings: list[LlamaSpikeRankingRow] = []
+    llama_dropoff = LlamaDropoffCounters(0, 0, 0, 0, 0, 0, 0, 0)
     if llama_pair_hour_rows:
-        llama_rankings, llama_thresholds = build_llama_rankings_with_fallback(
+        llama_rankings, llama_thresholds, llama_dropoff = build_llama_rankings_with_fallback(
             llama_pair_hour_rows,
             baseline_hours=args.llama_baseline_hours,
             persistence_hours=args.llama_persistence_hours,
@@ -4054,6 +4406,28 @@ def main() -> int:
             strict_min_swap_count=args.llama_strict_min_swap_count,
             strict_min_weth_liquidity=args.llama_strict_min_reserve_weth,
             min_ranked_target=args.llama_min_ranked_target,
+        )
+    elif llama_sources:
+        llama_dropoff = LlamaDropoffCounters(
+            fetched_raw_rows=llama_fetched_raw_rows,
+            after_time_window_filter=llama_fetched_raw_rows,
+            after_min_swaps_filter=0,
+            after_min_weth_filter=0,
+            after_baseline_ready_filter=0,
+            after_spike_multiplier_filter=0,
+            after_persistence_filter=0,
+            final_ranked_rows=0,
+        )
+    if llama_dropoff.fetched_raw_rows < llama_fetched_raw_rows:
+        llama_dropoff = LlamaDropoffCounters(
+            fetched_raw_rows=llama_fetched_raw_rows,
+            after_time_window_filter=llama_fetched_raw_rows,
+            after_min_swaps_filter=llama_dropoff.after_min_swaps_filter,
+            after_min_weth_filter=llama_dropoff.after_min_weth_filter,
+            after_baseline_ready_filter=llama_dropoff.after_baseline_ready_filter,
+            after_spike_multiplier_filter=llama_dropoff.after_spike_multiplier_filter,
+            after_persistence_filter=llama_dropoff.after_persistence_filter,
+            final_ranked_rows=llama_dropoff.final_ranked_rows,
         )
     if llama_thresholds is not None:
         print(
@@ -4071,6 +4445,15 @@ def main() -> int:
             file=sys.stderr,
         )
         print(f"Llama ranked spikes: {len(llama_rankings):,}", file=sys.stderr)
+    llama_diagnostics = build_llama_diagnostics(
+        source=(llama_sources[0] if llama_sources else None),
+        runtime=llama_runtime_state,
+        window_start_ts=start_ts,
+        window_end_ts=end_ts,
+        local_timezone=args.local_timezone,
+        thresholds=llama_thresholds,
+        counts=llama_dropoff,
+    )
     schedules = build_liquidity_schedule(
         rankings=rankings,
         observations=observations,
@@ -4091,6 +4474,7 @@ def main() -> int:
     v2_spike_csv = output_dir / "sushi_v2_yield_spikes.csv"
     llama_pair_hour_csv = output_dir / "llama_pair_hour_data.csv"
     llama_rankings_csv = output_dir / "llama_weth_spike_rankings.csv"
+    llama_diag_csv = output_dir / "llama_run_diagnostics.csv"
     quality_csv = output_dir / "data_quality_audit.csv"
     report_html = output_dir / "report.html"
 
@@ -4100,6 +4484,7 @@ def main() -> int:
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
     write_llama_pair_hour_csv(llama_pair_hour_csv, llama_pair_hour_rows)
     write_llama_spike_csv(llama_rankings_csv, llama_rankings, llama_thresholds)
+    write_llama_diagnostics_csv(llama_diag_csv, llama_diagnostics)
     write_data_quality_audit_csv(
         quality_csv,
         input_rows=quality_input_rows,
@@ -4128,6 +4513,7 @@ def main() -> int:
         llama_rankings,
         llama_thresholds,
         llama_sources,
+        llama_diagnostics,
         v2_spike_top=args.v2_spike_top,
         top_n=args.top,
         start_ts=start_ts,
@@ -4171,6 +4557,7 @@ def main() -> int:
     print(f"Wrote: {v2_spike_csv}", file=sys.stderr)
     print(f"Wrote: {llama_pair_hour_csv}", file=sys.stderr)
     print(f"Wrote: {llama_rankings_csv}", file=sys.stderr)
+    print(f"Wrote: {llama_diag_csv}", file=sys.stderr)
     print(f"Wrote: {quality_csv}", file=sys.stderr)
     print(f"Wrote: {report_html}", file=sys.stderr)
 

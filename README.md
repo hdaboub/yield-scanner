@@ -12,6 +12,7 @@ CLI application to scan Uniswap v3 and v4 pool hourly data from GraphQL sources,
 - `sushi_v2_yield_spikes.csv`: ranked V2 hourly fee-yield spikes using `feeWETH / reserveWETH`
 - `llama_pair_hour_data.csv`: Llama PairHourData-derived rows used for spike analysis
 - `llama_weth_spike_rankings.csv`: ranked Llama WETH spike rows (`feeWETH/reserveWETH`)
+- `llama_run_diagnostics.csv`: llama runtime diagnostics (meta block, seeding state, window, filter dropoff counters)
 - `data_quality_audit.csv`: per-source reject counts and reasons from quality filters
 - `report.html`: consolidated interactive report (rankings + schedule)
 - Fee-time columns in rankings:

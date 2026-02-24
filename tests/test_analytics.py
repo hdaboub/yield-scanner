@@ -81,12 +81,13 @@ class AnalyticsTests(unittest.TestCase):
             persistence_spike_multiplier=3.0,
             persistence_min_hits=2,
         )
-        ranked = scanner.build_llama_spike_rankings(rows, thresholds)
+        ranked, counters = scanner.build_llama_spike_rankings(rows, thresholds)
         self.assertTrue(ranked)
         top = ranked[0]
         self.assertGreaterEqual(top.spike_multiplier, 3.0)
         self.assertGreaterEqual(top.persistence_hits, 2)
         self.assertEqual(top.pair, "0xpair")
+        self.assertGreater(counters.fetched_raw_rows, 0)
 
     def test_llama_fallback_relaxes_when_sparse(self) -> None:
         base_ts = int(dt.datetime(2026, 2, 1, 0, 0, tzinfo=dt.timezone.utc).timestamp())
@@ -121,7 +122,7 @@ class AnalyticsTests(unittest.TestCase):
                     score=0.004,
                 )
             )
-        ranked, thresholds = scanner.build_llama_rankings_with_fallback(
+        ranked, thresholds, _counters = scanner.build_llama_rankings_with_fallback(
             rows,
             baseline_hours=72,
             persistence_hours=6,
@@ -137,6 +138,170 @@ class AnalyticsTests(unittest.TestCase):
         self.assertTrue(ranked)
         self.assertEqual(thresholds.min_swap_count, 5)
         self.assertAlmostEqual(thresholds.min_weth_liquidity, 25.0)
+
+    def test_llama_diagnostics_messages_for_empty_cases(self) -> None:
+        counts_a = scanner.LlamaDropoffCounters(
+            fetched_raw_rows=0,
+            after_time_window_filter=0,
+            after_min_swaps_filter=0,
+            after_min_weth_filter=0,
+            after_baseline_ready_filter=0,
+            after_spike_multiplier_filter=0,
+            after_persistence_filter=0,
+            final_ranked_rows=0,
+        )
+        stage_a, msg_a = scanner.summarize_llama_dropoff(counts_a)
+        self.assertEqual(stage_a, "fetched_raw_rows")
+        self.assertIn("0 fetched", msg_a)
+
+        counts_b = scanner.LlamaDropoffCounters(
+            fetched_raw_rows=50,
+            after_time_window_filter=50,
+            after_min_swaps_filter=22,
+            after_min_weth_filter=0,
+            after_baseline_ready_filter=0,
+            after_spike_multiplier_filter=0,
+            after_persistence_filter=0,
+            final_ranked_rows=0,
+        )
+        stage_b, msg_b = scanner.summarize_llama_dropoff(counts_b)
+        self.assertEqual(stage_b, "after_min_weth_filter")
+        self.assertIn("filtered out", msg_b)
+        self.assertIn("after_min_swaps_filter=22", msg_b)
+
+    def test_report_llama_empty_case_a_shows_zero_fetched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "report.html"
+            diagnostics = scanner.LlamaRunDiagnostics(
+                endpoint="https://api.studio.thegraph.com/query/1742316/llama/v0.2.9",
+                version="v2",
+                source_name="sushi-v2-fee-spikes-mainnet",
+                window_start_ts=1_700_000_000,
+                window_end_ts=1_700_086_400,
+                local_timezone="America/Chicago",
+                thresholds_label="default",
+                min_swap_count=10,
+                min_weth_liquidity=50.0,
+                baseline_hours=72,
+                persistence_hours=6,
+                persistence_spike_multiplier=3.0,
+                persistence_min_hits=2,
+                fallback_trace="50/10 -> 25/5 -> 10/3",
+                counts=scanner.LlamaDropoffCounters(0, 0, 0, 0, 0, 0, 0, 0),
+                meta_block_number=12345,
+                seed_next_index=4457,
+                seed_total=4457,
+                seed_last_block=22_000_000,
+                empty_stage="fetched_raw_rows",
+                empty_message="No PairHourData rows returned from llama for the queried window (0 fetched).",
+            )
+            scanner.write_report_html(
+                path=out,
+                rankings=[],
+                schedules=[],
+                v2_spike_rows=[],
+                llama_rows=[],
+                llama_thresholds=None,
+                llama_sources=[
+                    scanner.SourceConfig(
+                        name="sushi-v2-fee-spikes-mainnet",
+                        version="v2",
+                        chain="ethereum",
+                        endpoint=diagnostics.endpoint,
+                        hourly_query="query {}",
+                        source_type="v2_spike",
+                    )
+                ],
+                llama_diagnostics=diagnostics,
+                v2_spike_top=25,
+                top_n=10,
+                start_ts=diagnostics.window_start_ts,
+                end_ts=diagnostics.window_end_ts,
+                source_count=1,
+                local_timezone="America/Chicago",
+                min_tvl_usd=0.0,
+                max_hourly_yield_pct=None,
+                quality_input_rows=0,
+                quality_output_rows=0,
+                quality_rejected_rows=0,
+            )
+            text = out.read_text(encoding="utf-8")
+            self.assertIn("0 fetched", text)
+            self.assertIn("meta.block=12345", text)
+            self.assertIn("Window UTC", text)
+
+    def test_report_llama_empty_case_b_shows_filtered_out_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "report.html"
+            diagnostics = scanner.LlamaRunDiagnostics(
+                endpoint="https://api.studio.thegraph.com/query/1742316/llama/v0.2.9",
+                version="v2",
+                source_name="sushi-v2-fee-spikes-mainnet",
+                window_start_ts=1_700_000_000,
+                window_end_ts=1_700_086_400,
+                local_timezone="America/Chicago",
+                thresholds_label="default",
+                min_swap_count=10,
+                min_weth_liquidity=50.0,
+                baseline_hours=72,
+                persistence_hours=6,
+                persistence_spike_multiplier=3.0,
+                persistence_min_hits=2,
+                fallback_trace="50/10 -> 25/5 -> 10/3",
+                counts=scanner.LlamaDropoffCounters(50, 50, 22, 0, 0, 0, 0, 0),
+                meta_block_number=12345,
+                seed_next_index=4457,
+                seed_total=4457,
+                seed_last_block=22_000_000,
+                empty_stage="after_min_weth_filter",
+                empty_message=(
+                    "Rows fetched from llama but all were filtered out "
+                    "(drop to 0 at after_min_weth_filter after after_min_swaps_filter=22)."
+                ),
+            )
+            scanner.write_report_html(
+                path=out,
+                rankings=[],
+                schedules=[],
+                v2_spike_rows=[],
+                llama_rows=[],
+                llama_thresholds=scanner.choose_llama_adaptive_thresholds(
+                    total_rows=50,
+                    min_swap_count_floor=10,
+                    min_weth_liquidity_floor=50.0,
+                    baseline_hours=72,
+                    persistence_hours=6,
+                    persistence_spike_multiplier=3.0,
+                    persistence_min_hits=2,
+                    band="default",
+                ),
+                llama_sources=[
+                    scanner.SourceConfig(
+                        name="sushi-v2-fee-spikes-mainnet",
+                        version="v2",
+                        chain="ethereum",
+                        endpoint=diagnostics.endpoint,
+                        hourly_query="query {}",
+                        source_type="v2_spike",
+                    )
+                ],
+                llama_diagnostics=diagnostics,
+                v2_spike_top=25,
+                top_n=10,
+                start_ts=diagnostics.window_start_ts,
+                end_ts=diagnostics.window_end_ts,
+                source_count=1,
+                local_timezone="America/Chicago",
+                min_tvl_usd=0.0,
+                max_hourly_yield_pct=None,
+                quality_input_rows=0,
+                quality_output_rows=0,
+                quality_rejected_rows=0,
+            )
+            text = out.read_text(encoding="utf-8")
+            self.assertIn("filtered out", text)
+            self.assertIn("after_min_weth_filter", text)
+            self.assertIn("after_min_swaps=22", text)
 
     def test_rank_pools_orders_by_earning_potential_and_finds_best_window(self) -> None:
         start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())
