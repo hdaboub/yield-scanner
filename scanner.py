@@ -2784,6 +2784,19 @@ def usd_per_1000_from_yield_pct(yield_pct: float) -> float:
     return (yield_pct / 100.0) * 1000.0
 
 
+def infer_exchange_name(source_name: str) -> str:
+    lowered = source_name.lower()
+    if "sushi" in lowered:
+        return "Sushi"
+    if "uniswap" in lowered:
+        return "Uniswap"
+    if "pancake" in lowered:
+        return "PancakeSwap"
+    if "aerodrome" in lowered:
+        return "Aerodrome"
+    return "Unknown"
+
+
 def _weekly_hour_index(ts: int) -> int:
     dt_utc = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
     return (dt_utc.weekday() * 24) + dt_utc.hour
@@ -3687,11 +3700,14 @@ def write_report_html(
 
     ranking_rows = []
     for idx, row in enumerate(top_rankings, start=1):
+        exchange = infer_exchange_name(row.source_name)
         ranking_rows.append(
             "<tr>"
             f"<td>{idx}</td>"
+            f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.version)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
+            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
             f"<td>{row.fee_tier}</td>"
             f"<td>{row.avg_tvl_usd:.2f}</td>"
@@ -3717,10 +3733,13 @@ def write_report_html(
 
     schedule_rows = []
     for row in top_schedules:
+        exchange = infer_exchange_name(row.source_name)
         schedule_rows.append(
             "<tr>"
             f"<td>{row.pool_rank}</td>"
+            f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.version)}</td>"
+            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.add_pattern_utc)}</td>"
             f"<td>{html.escape(row.remove_pattern_utc)}</td>"
@@ -3737,11 +3756,14 @@ def write_report_html(
 
     jump_rows = []
     for row, status, eta_seconds in jump_now_rows:
+        exchange = infer_exchange_name(row.source_name)
         jump_rows.append(
             "<tr>"
             f"<td>{row.pool_rank}</td>"
+            f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.version)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
+            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(status)}</td>"
             f"<td>{html.escape(format_eta(eta_seconds))}</td>"
@@ -3756,22 +3778,30 @@ def write_report_html(
         )
 
     rankings_table_html = "\n".join(ranking_rows) if ranking_rows else (
-        "<tr><td colspan='23'>No ranked pools found.</td></tr>"
+        "<tr><td colspan='25'>No ranked pools found.</td></tr>"
     )
     schedules_table_html = "\n".join(schedule_rows) if schedule_rows else (
-        "<tr><td colspan='13'>No reliable recurring schedule blocks found.</td></tr>"
+        "<tr><td colspan='15'>No reliable recurring schedule blocks found.</td></tr>"
     )
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
-        "<tr><td colspan='13'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
+        "<tr><td colspan='15'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
     top_llama_rows = llama_rows[: max(0, v2_spike_top)]
     llama_rows_html = []
     for idx, row in enumerate(top_llama_rows, start=1):
+        exchange = infer_exchange_name(row.source_name)
+        pool_name = (
+            f"{row.token0_symbol}/{row.token1_symbol}"
+            if row.token0_symbol or row.token1_symbol
+            else f"{row.token0}/{row.token1}"
+        )
         llama_rows_html.append(
             "<tr>"
             f"<td>{idx}</td>"
+            f"<td>{html.escape(exchange)}</td>"
             f"<td>{html.escape(row.source_name)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
+            f"<td>{html.escape(pool_name)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.token0)}</td>"
             f"<td>{html.escape(row.token1)}</td>"
@@ -3800,7 +3830,7 @@ def write_report_html(
             if llama_diagnostics is not None
             else "No V2 fee-yield spike rows matched adaptive threshold and persistence filters."
         )
-        llama_table_html = f"<tr><td colspan='21'>{empty_text}</td></tr>"
+        llama_table_html = f"<tr><td colspan='23'>{empty_text}</td></tr>"
     llama_endpoint_note = "<br/>".join(
         f"{html.escape(src.name)}: <code>{html.escape(src.endpoint)}</code>" for src in llama_sources
     )
@@ -3984,7 +4014,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Pool Rank</th><th>Version</th><th>Chain</th><th>Pair</th><th>Status</th>
+              <th>Pool Rank</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Pool Name</th><th>Pair</th><th>Status</th>
               <th>ETA</th><th>Next Add UTC</th><th>Next Add Local</th><th>Next Remove UTC</th><th>Next Remove Local</th>
               <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th><th>Avg USD per $1k / hr</th>
             </tr>
@@ -4012,7 +4042,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Rank</th><th>Source</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
+              <th>Rank</th><th>Exchange</th><th>Source</th><th>Chain</th><th>Pool Name</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
               <th>Token0 Symbol</th><th>Token1 Symbol</th>
               <th>Hour UTC</th><th>Hour Chicago</th><th>Swap Count</th>
               <th>feeWETH</th><th>reserveWETH</th><th>Score</th><th>Hourly Yield %</th><th>USD per $1k / hr</th><th>Rough APR %</th>
@@ -4041,7 +4071,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Rank</th><th>Version</th><th>Chain</th><th>Pair</th><th>Fee Tier</th>
+              <th>Rank</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Pool Name</th><th>Pair</th><th>Fee Tier</th>
               <th>Avg TVL USD</th><th>Outlier Hours</th>
               <th>Avg Hourly Fee USD</th><th>Total Fees USD</th><th>Obs Hours</th>
               <th>Fee Period Start UTC</th><th>Fee Period End UTC</th>
@@ -4066,7 +4096,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Pool Rank</th><th>Version</th><th>Pair</th>
+              <th>Pool Rank</th><th>Exchange</th><th>Version</th><th>Pool Name</th><th>Pair</th>
               <th>Add Pattern UTC</th><th>Remove Pattern UTC</th>
               <th>Next Add UTC</th><th>Next Add Local</th><th>Next Remove UTC</th><th>Next Remove Local</th>
               <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th><th>Avg USD per $1k / hr</th><th>Block Hours</th>
