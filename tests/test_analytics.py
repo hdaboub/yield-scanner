@@ -411,6 +411,38 @@ class AnalyticsTests(unittest.TestCase):
         self.assertGreater(diags[0].capped_hours, 0)
         self.assertLess(diags[0].max_capped_hourly_yield_pct, diags[0].max_raw_hourly_yield_pct)
 
+    def test_rank_pools_hard_cap_rule_only_when_rows_removed(self) -> None:
+        start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())
+        rows = []
+        for hour in range(48):
+            ts = start + hour * 3600
+            y = 0.001
+            rows.append(
+                Observation(
+                    source_name="s1",
+                    version="v3",
+                    chain="ethereum",
+                    pool_id="pool-x",
+                    pair="AAA/BBB",
+                    fee_tier=3000,
+                    ts=ts,
+                    volume_usd=100000.0,
+                    tvl_usd=100000.0,
+                    fees_usd=y * 100000.0,
+                    hourly_yield=y,
+                )
+            )
+        diags: list[scanner.PoolRankingDiagnostic] = []
+        rankings = rank_pools(
+            rows,
+            min_samples=24,
+            max_hourly_yield_pct=100.0,
+            diagnostics_out=diags,
+        )
+        self.assertEqual(len(rankings), 1)
+        self.assertEqual(len(diags), 1)
+        self.assertNotIn("hard_cap", diags[0].rule_triggered)
+
     def test_normalize_row_derives_fees_when_missing(self) -> None:
         source = SourceConfig(
             name="v4-test",
@@ -454,6 +486,32 @@ class AnalyticsTests(unittest.TestCase):
             "pool": {
                 "id": "0xpool",
                 "feeTier": "8388608",
+                "token0": {"symbol": "WETH"},
+                "token1": {"symbol": "USDC"},
+            },
+        }
+
+        obs = normalize_row(source, row)
+        self.assertIsNotNone(obs)
+        assert obs is not None
+        self.assertIsNone(obs.fees_usd)
+        self.assertIsNone(obs.hourly_yield)
+
+    def test_normalize_row_does_not_derive_high_near_one_fee_tier(self) -> None:
+        source = SourceConfig(
+            name="v4-test",
+            version="v4",
+            chain="ethereum",
+            endpoint="https://example.invalid/graphql",
+            hourly_query="query {}",
+        )
+        row = {
+            "ts": 1700000000,
+            "volumeUSD": "100000",
+            "tvlUSD": "2000000",
+            "pool": {
+                "id": "0xpool",
+                "feeTier": "999610",
                 "token0": {"symbol": "WETH"},
                 "token1": {"symbol": "USDC"},
             },

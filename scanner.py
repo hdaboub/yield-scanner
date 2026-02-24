@@ -51,6 +51,12 @@ TOKEN_SYMBOL_OVERRIDES: dict[str, str] = {
     "0xdac17f958d2ee523a2206206994597c13d831ec7": "USDT",
     "0x6b175474e89094c44da98b954eedeac495271d0f": "DAI",
     "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "WBTC",
+    "0x6b3595068778dd592e39a122f4f5a5cf09c90fe2": "SUSHI",
+    "0xdbdb4d16eda451d0503b854cf79d55697f90c8df": "ALCX",
+    "0x514910771af9ca656af840dff83e8264ecf986ca": "LINK",
+    "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2": "MKR",
+    "0x4e3fbd56cd56c3e72c1403e103b45db9da5b9d2b": "CVX",
+    "0x0bc529c00c6401aef6d220be8c6ea1667f6ad93e": "YFI",
 }
 
 
@@ -1074,17 +1080,27 @@ def human_pool_label(
     return f"{token0}/{token1}"
 
 
-def derive_hourly_fees_usd(volume_usd: float, fee_tier: int) -> float | None:
+def derive_hourly_fees_usd(volume_usd: float, fee_tier: int, source_type: str = "hourly") -> float | None:
     # Uniswap fee tiers are in hundredths of a bip for v3-style static tiers
     # and should be within 0..1_000_000 (0%..100%). Values above that are
     # protocol-specific encodings (for example dynamic-fee flags) and cannot
     # be converted to a direct percentage.
-    if fee_tier < 0 or fee_tier > 1_000_000:
+    # Guardrail: for regular hourly sources, only derive from well-known static
+    # tiers. High/encoded values (for example near 1e6 on v4 dynamic paths) can
+    # create unrealistic implied fee rates if treated as direct percentages.
+    if source_type != "v2_spike" and (fee_tier < 0 or fee_tier > 100_000):
+        return None
+    if source_type == "v2_spike" and (fee_tier < 0 or fee_tier > 1_000_000):
         return None
     return volume_usd * (fee_tier / 1_000_000)
 
 
-def sanitize_hourly_fees_usd(volume_usd: float, fee_tier: int, fees_usd: float | None) -> float | None:
+def sanitize_hourly_fees_usd(
+    volume_usd: float,
+    fee_tier: int,
+    fees_usd: float | None,
+    source_type: str = "hourly",
+) -> float | None:
     if fees_usd is None:
         return None
     if volume_usd <= 0:
@@ -1092,6 +1108,9 @@ def sanitize_hourly_fees_usd(volume_usd: float, fee_tier: int, fees_usd: float |
     implied_fee_rate = fees_usd / volume_usd
     # Fees above traded volume are impossible for LP fees and indicate bad scaling.
     if implied_fee_rate < 0 or implied_fee_rate > 1.0:
+        return None
+
+    if source_type != "v2_spike" and implied_fee_rate > 0.10:
         return None
 
     if fee_tier <= 1_000_000:
@@ -1158,10 +1177,15 @@ def normalize_row(source: SourceConfig, row: dict[str, Any]) -> Observation | No
     fee_tier = to_int(pool.get("feeTier", row.get("feeTier", 0)), default=0)
     fees_usd_raw = row.get("feesUSD")
     if fees_usd_raw is None:
-        fees_usd = derive_hourly_fees_usd(volume_usd, fee_tier)
+        fees_usd = derive_hourly_fees_usd(volume_usd, fee_tier, source.source_type)
     else:
         fees_usd = to_float(fees_usd_raw)
-    fees_usd = sanitize_hourly_fees_usd(volume_usd=volume_usd, fee_tier=fee_tier, fees_usd=fees_usd)
+    fees_usd = sanitize_hourly_fees_usd(
+        volume_usd=volume_usd,
+        fee_tier=fee_tier,
+        fees_usd=fees_usd,
+        source_type=source.source_type,
+    )
 
     token0_address = extract_token_id(pool, "token0", "currency0")
     token1_address = extract_token_id(pool, "token1", "currency1")
@@ -2978,7 +3002,7 @@ def rank_pools(
                 rules.append("ranking_tvl_floor")
             if capped_hours > 0:
                 rules.append("winsorized")
-            if max_hourly_yield_pct is not None:
+            if max_hourly_yield_pct is not None and samples_after_hard_cap < samples_after_tvl_floor:
                 rules.append("hard_cap")
             diagnostics_out.append(
                 PoolRankingDiagnostic(
@@ -4666,8 +4690,11 @@ def main() -> int:
         print("No observations fetched. Check endpoints/query mappings.", file=sys.stderr)
 
     ranking_diagnostics: list[PoolRankingDiagnostic] = []
+    ranking_observations = [
+        row for row in observations if row.source_name not in v2_spike_sources
+    ]
     rankings = rank_pools(
-        observations=observations,
+        observations=ranking_observations,
         min_samples=args.min_samples,
         min_tvl_usd=args.min_tvl_usd,
         max_hourly_yield_pct=args.max_hourly_yield_pct,
