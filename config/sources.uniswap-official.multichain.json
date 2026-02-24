@@ -104,8 +104,9 @@
       "source_type": "v2_spike",
       "version": "v2",
       "chain": "ethereum",
-      "endpoint": "https://api.studio.thegraph.com/query/1742316/llama/v0.2.1",
-      "weth_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      "endpoint": "https://api.studio.thegraph.com/query/1742316/llama/v0.2.9",
+      "weth_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "note": "Llama subgraph endpoint (Studio v0.2.9)."
     },
     {
       "name": "template-sushiswap-v3-arbitrum",

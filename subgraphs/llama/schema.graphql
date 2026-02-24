@@ -1,0 +1,69 @@
+type V2Swap @entity(immutable: true) {
+  id: ID!
+  pair: Bytes!
+  sender: Bytes!
+  to: Bytes!
+  amount0In: BigInt!
+  amount1In: BigInt!
+  amount0Out: BigInt!
+  amount1Out: BigInt!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+type V3Swap @entity(immutable: true) {
+  id: ID!
+  pool: Bytes!
+  sender: Bytes!
+  recipient: Bytes!
+  amount0: BigInt!
+  amount1: BigInt!
+  sqrtPriceX96: BigInt!
+  liquidity: BigInt!
+  tick: Int!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+type Token @entity(immutable: false) {
+  id: Bytes!
+  symbol: String
+  name: String
+  decimals: Int
+}
+
+type Pair @entity(immutable: false) {
+  id: Bytes!
+  token0: Bytes!
+  token1: Bytes!
+  createdAtTimestamp: BigInt!
+  createdAtBlockNumber: BigInt!
+  reserve0: BigInt!
+  reserve1: BigInt!
+  lastSyncTimestamp: BigInt!
+  lastSyncBlockNumber: BigInt!
+}
+
+type PairHourData @entity(immutable: false) {
+  id: ID!
+  pair: Bytes!
+  hourStartUnix: Int!
+  volume0In: BigInt!
+  volume1In: BigInt!
+  volume0Out: BigInt!
+  volume1Out: BigInt!
+  fee0: BigInt!
+  fee1: BigInt!
+  reserve0: BigInt!
+  reserve1: BigInt!
+  swapCount: Int!
+}
+
+type V2SeedState @entity(immutable: false) {
+  id: ID!
+  nextIndex: Int!
+  total: Int!
+  lastBlock: BigInt!
+}

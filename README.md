@@ -10,6 +10,9 @@ CLI application to scan Uniswap v3 and v4 pool hourly data from GraphQL sources,
 - `liquidity_schedule.csv`: recommended add/remove schedule blocks from reliable recurring high-yield windows
 - `liquidity_schedule.md`: human-readable schedule summary with next UTC add/remove times
 - `sushi_v2_yield_spikes.csv`: ranked V2 hourly fee-yield spikes using `feeWETH / reserveWETH`
+- `llama_pair_hour_data.csv`: Llama PairHourData-derived rows used for spike analysis
+- `llama_weth_spike_rankings.csv`: ranked Llama WETH spike rows (`feeWETH/reserveWETH`)
+- `data_quality_audit.csv`: per-source reject counts and reasons from quality filters
 - `report.html`: consolidated interactive report (rankings + schedule)
 - Fee-time columns in rankings:
   - `observed_hours`, `observed_days`
@@ -218,6 +221,12 @@ Important: if `--schedule-min-occurrences` is `2`, you generally need at least 3
   - `deploy/digitalocean/install_runtime.sh`
   - `deploy/digitalocean/setup_lpscan.sh`
   - `deploy/digitalocean/deploy_update_and_run.sh`
+
+## Llama Subgraph Integration
+
+- Subgraph code is tracked in `subgraphs/llama/`.
+- Subgraph usage docs are in `subgraphs/llama/README.md`.
+- App-side query client is in `src/thegraph/llama_client.py`.
 
 ## GitHub Workflow
 

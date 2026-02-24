@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -894,6 +895,69 @@ def normalize_row(source: SourceConfig, row: dict[str, Any]) -> Observation | No
     )
 
 
+def classify_quality_rejection(
+    obs: Observation,
+    min_tvl_usd: float,
+    max_hourly_yield_pct: float | None,
+    v2_spike_sources: set[str] | None = None,
+) -> str | None:
+    is_v2_spike = v2_spike_sources is not None and obs.source_name in v2_spike_sources
+    if obs.volume_usd < 0:
+        return "negative_volume"
+    if obs.tvl_usd < 0:
+        return "negative_tvl"
+    if obs.fees_usd is not None and obs.fees_usd < 0:
+        return "negative_fees"
+    if (not is_v2_spike) and obs.fees_usd is not None and obs.volume_usd > 0 and obs.fees_usd > obs.volume_usd:
+        return "fees_gt_volume"
+    if (
+        not is_v2_spike
+        and
+        obs.fees_usd is not None
+        and obs.volume_usd > 0
+        and obs.fee_tier > 1_000_000
+        and (obs.fees_usd / obs.volume_usd) > 0.10
+    ):
+        return "dynamic_fee_rate_gt_10pct"
+    if (not is_v2_spike) and obs.fees_usd is not None and obs.tvl_usd <= 0:
+        return "fees_with_nonpositive_tvl"
+    if obs.tvl_usd <= 0:
+        return "nonpositive_tvl"
+    if (not is_v2_spike) and obs.tvl_usd < max(0.0, min_tvl_usd):
+        return "tvl_below_floor"
+    if obs.hourly_yield is not None:
+        if obs.hourly_yield < 0:
+            return "negative_hourly_yield"
+        if max_hourly_yield_pct is not None:
+            cap_ratio = max(0.0, max_hourly_yield_pct) / 100.0
+            if obs.hourly_yield > cap_ratio:
+                return "hourly_yield_above_cap"
+    return None
+
+
+def filter_observations_with_quality_audit(
+    observations: list[Observation],
+    min_tvl_usd: float,
+    max_hourly_yield_pct: float | None,
+    v2_spike_sources: set[str] | None = None,
+) -> tuple[list[Observation], dict[tuple[str, str, str, str], int]]:
+    kept: list[Observation] = []
+    rejected: dict[tuple[str, str, str, str], int] = defaultdict(int)
+    for obs in observations:
+        reason = classify_quality_rejection(
+            obs=obs,
+            min_tvl_usd=min_tvl_usd,
+            max_hourly_yield_pct=max_hourly_yield_pct,
+            v2_spike_sources=v2_spike_sources,
+        )
+        if reason is None:
+            kept.append(obs)
+            continue
+        key = (obs.source_name, obs.version, obs.chain, reason)
+        rejected[key] += 1
+    return kept, dict(rejected)
+
+
 V2_PAIR_HOUR_QUERY = """
 query PairHourPage($first: Int!, $start: Int!, $end: Int!) {
   pairHourDatas(
@@ -1753,6 +1817,14 @@ def fetch_with_cache(
 
     fetch_plan: list[tuple[SourceConfig, int, int]] = []
     for source in sources:
+        if source.source_type == "v2_spike":
+            # V2 spike sources are sparse and "no-row" windows are common.
+            # Always scan the full requested window so historical spikes remain visible.
+            fetch_start = start_ts
+            fetch_end = end_ts
+            if fetch_start < fetch_end:
+                fetch_plan.append((source, fetch_start, fetch_end))
+            continue
         latest_ts = get_source_latest_ts(conn, source)
         last_checked_end_ts = get_source_last_checked_end_ts(conn, source)
         if latest_ts is None:
@@ -2066,6 +2138,91 @@ def format_eta(seconds: int) -> str:
     if hours <= 0:
         return f"{minutes}m"
     return f"{hours}h {minutes}m"
+
+
+def write_data_quality_audit_csv(
+    path: Path,
+    input_rows: int,
+    output_rows: int,
+    rejected_counts: dict[tuple[str, str, str, str], int],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    by_reason: dict[str, int] = defaultdict(int)
+    for (_, _, _, reason), count in rejected_counts.items():
+        by_reason[reason] += count
+
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "scope",
+                "source_name",
+                "version",
+                "chain",
+                "reason",
+                "count",
+                "pct_of_input_rows",
+                "input_rows",
+                "output_rows",
+            ]
+        )
+        writer.writerow(
+            [
+                "summary",
+                "ALL",
+                "ALL",
+                "ALL",
+                "input_rows",
+                input_rows,
+                "100.000000",
+                input_rows,
+                output_rows,
+            ]
+        )
+        writer.writerow(
+            [
+                "summary",
+                "ALL",
+                "ALL",
+                "ALL",
+                "output_rows",
+                output_rows,
+                f"{(100.0 * output_rows / input_rows) if input_rows else 0.0:.6f}",
+                input_rows,
+                output_rows,
+            ]
+        )
+        for reason, count in sorted(by_reason.items(), key=lambda kv: (-kv[1], kv[0])):
+            writer.writerow(
+                [
+                    "reason_total",
+                    "ALL",
+                    "ALL",
+                    "ALL",
+                    reason,
+                    count,
+                    f"{(100.0 * count / input_rows) if input_rows else 0.0:.6f}",
+                    input_rows,
+                    output_rows,
+                ]
+            )
+        for (source, version, chain, reason), count in sorted(
+            rejected_counts.items(),
+            key=lambda kv: (-kv[1], kv[0][0], kv[0][1], kv[0][2], kv[0][3]),
+        ):
+            writer.writerow(
+                [
+                    "source_reason",
+                    source,
+                    version,
+                    chain,
+                    reason,
+                    count,
+                    f"{(100.0 * count / input_rows) if input_rows else 0.0:.6f}",
+                    input_rows,
+                    output_rows,
+                ]
+            )
 
 
 def next_weekly_occurrence(after_ts: int, weekday: int, hour: int) -> int:
@@ -2582,6 +2739,61 @@ def write_v2_spike_csv(path: Path, rows: Iterable[V2YieldSpikeRow]) -> None:
             )
 
 
+def write_llama_pair_hour_csv(
+    path: Path,
+    observations: Iterable[Observation],
+    v2_spike_sources: set[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "source_name",
+                "version",
+                "chain",
+                "pair_id",
+                "token0",
+                "token1",
+                "timestamp",
+                "hour_utc",
+                "hour_chicago",
+                "swap_count_proxy",
+                "fee_weth_proxy",
+                "reserve_weth_proxy",
+                "score_feeWETH_over_reserveWETH",
+                "hourly_yield_pct",
+                "usd_per_1000_liquidity_hourly",
+            ]
+        )
+        for obs in observations:
+            if obs.source_name not in v2_spike_sources:
+                continue
+            token0, token1 = "", ""
+            if "/" in obs.pair:
+                token0, token1 = obs.pair.split("/", 1)
+            score = obs.hourly_yield if obs.hourly_yield is not None else 0.0
+            writer.writerow(
+                [
+                    obs.source_name,
+                    obs.version,
+                    obs.chain,
+                    obs.pool_id,
+                    token0,
+                    token1,
+                    obs.ts,
+                    iso_hour(obs.ts),
+                    iso_hour_chicago(obs.ts),
+                    int(max(0, round(obs.volume_usd))),
+                    f"{(obs.fees_usd if obs.fees_usd is not None else 0.0):.10f}",
+                    f"{obs.tvl_usd:.10f}",
+                    f"{score:.12f}",
+                    f"{(score * 100):.10f}",
+                    f"{(score * 1000):.10f}",
+                ]
+            )
+
+
 def write_report_html(
     path: Path,
     rankings: list[PoolRanking],
@@ -2595,6 +2807,9 @@ def write_report_html(
     local_timezone: str,
     min_tvl_usd: float,
     max_hourly_yield_pct: float | None,
+    quality_input_rows: int,
+    quality_output_rows: int,
+    quality_rejected_rows: int,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     top_rankings = rankings[:top_n]
@@ -2833,12 +3048,18 @@ def write_report_html(
         <div><strong>Analysis Window End:</strong> {html.escape(iso_hour(end_ts))}</div>
         <div><strong>Pools Ranked:</strong> {len(rankings)}</div>
         <div><strong>Schedule Blocks:</strong> {len(schedules)}</div>
+        <div><strong>Quality Input Rows:</strong> {quality_input_rows}</div>
+        <div><strong>Quality Output Rows:</strong> {quality_output_rows}</div>
+        <div><strong>Quality Rejected Rows:</strong> {quality_rejected_rows}</div>
       </div>
       <div class="links" style="margin-top:10px;">
         <a href="pool_rankings.csv">pool_rankings.csv</a>
         <a href="hourly_observations.csv">hourly_observations.csv</a>
         <a href="liquidity_schedule.csv">liquidity_schedule.csv</a>
         <a href="sushi_v2_yield_spikes.csv">sushi_v2_yield_spikes.csv</a>
+        <a href="llama_pair_hour_data.csv">llama_pair_hour_data.csv</a>
+        <a href="llama_weth_spike_rankings.csv">llama_weth_spike_rankings.csv</a>
+        <a href="data_quality_audit.csv">data_quality_audit.csv</a>
       </div>
     </section>
 
@@ -3170,6 +3391,24 @@ def main() -> int:
         print(f"Scan failed: {err}", file=sys.stderr)
         return 1
 
+    quality_input_rows = len(observations)
+    observations, quality_rejected_counts = filter_observations_with_quality_audit(
+        observations=observations,
+        min_tvl_usd=args.min_tvl_usd,
+        max_hourly_yield_pct=args.max_hourly_yield_pct,
+        v2_spike_sources=v2_spike_sources,
+    )
+    quality_output_rows = len(observations)
+    quality_rejected_rows = quality_input_rows - quality_output_rows
+    if quality_rejected_rows > 0:
+        print(
+            (
+                f"Data quality filters rejected {quality_rejected_rows:,} / {quality_input_rows:,} rows "
+                f"({(100.0 * quality_rejected_rows / quality_input_rows):.2f}%)."
+            ),
+            file=sys.stderr,
+        )
+
     if failures and not args.strict_sources:
         print("", file=sys.stderr)
         print(f"{len(failures)} source(s) failed and were skipped:", file=sys.stderr)
@@ -3213,12 +3452,23 @@ def main() -> int:
     schedule_csv = output_dir / "liquidity_schedule.csv"
     schedule_md = output_dir / "liquidity_schedule.md"
     v2_spike_csv = output_dir / "sushi_v2_yield_spikes.csv"
+    llama_pair_hour_csv = output_dir / "llama_pair_hour_data.csv"
+    llama_rankings_csv = output_dir / "llama_weth_spike_rankings.csv"
+    quality_csv = output_dir / "data_quality_audit.csv"
     report_html = output_dir / "report.html"
 
     write_hourly_csv(hourly_csv, observations)
     write_rankings_csv(ranking_csv, rankings)
     write_schedule_csv(schedule_csv, schedules)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
+    write_llama_pair_hour_csv(llama_pair_hour_csv, observations, v2_spike_sources=v2_spike_sources)
+    write_v2_spike_csv(llama_rankings_csv, v2_spike_rows)
+    write_data_quality_audit_csv(
+        quality_csv,
+        input_rows=quality_input_rows,
+        output_rows=quality_output_rows,
+        rejected_counts=quality_rejected_counts,
+    )
     write_summary_md(
         summary_md,
         rankings,
@@ -3246,6 +3496,9 @@ def main() -> int:
         local_timezone=args.local_timezone,
         min_tvl_usd=args.min_tvl_usd,
         max_hourly_yield_pct=args.max_hourly_yield_pct,
+        quality_input_rows=quality_input_rows,
+        quality_output_rows=quality_output_rows,
+        quality_rejected_rows=quality_rejected_rows,
     )
 
     print_top(rankings, args.top)
@@ -3276,6 +3529,9 @@ def main() -> int:
     print(f"Wrote: {schedule_csv}", file=sys.stderr)
     print(f"Wrote: {schedule_md}", file=sys.stderr)
     print(f"Wrote: {v2_spike_csv}", file=sys.stderr)
+    print(f"Wrote: {llama_pair_hour_csv}", file=sys.stderr)
+    print(f"Wrote: {llama_rankings_csv}", file=sys.stderr)
+    print(f"Wrote: {quality_csv}", file=sys.stderr)
     print(f"Wrote: {report_html}", file=sys.stderr)
 
     return 0
