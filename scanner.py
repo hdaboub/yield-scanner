@@ -1244,6 +1244,11 @@ def classify_quality_rejection(
     v2_spike_sources: set[str] | None = None,
 ) -> str | None:
     is_v2_spike = v2_spike_sources is not None and obs.source_name in v2_spike_sources
+    implied_fee_rate = (
+        (obs.fees_usd / obs.volume_usd)
+        if obs.fees_usd is not None and obs.volume_usd > 0
+        else None
+    )
     if obs.volume_usd < 0:
         return "negative_volume"
     if obs.tvl_usd < 0:
@@ -1254,9 +1259,15 @@ def classify_quality_rejection(
         return "fees_gt_volume"
     if (
         not is_v2_spike
-        and obs.fees_usd is not None
-        and obs.volume_usd > 0
-        and (obs.fees_usd / obs.volume_usd) > 0.10
+        and implied_fee_rate is not None
+        and implied_fee_rate > 0.10
+        and obs.fee_tier >= 100_000
+    ):
+        return "invalid_fee_tier"
+    if (
+        not is_v2_spike
+        and implied_fee_rate is not None
+        and implied_fee_rate > 0.10
     ):
         return "implied_fee_rate_gt_10pct"
     if (
@@ -1307,9 +1318,23 @@ def filter_observations_with_quality_audit(
     return kept, dict(rejected)
 
 
+def compute_source_tvl_alias_sanity(
+    observations: list[Observation],
+    v2_spike_sources: set[str] | None = None,
+) -> dict[tuple[str, str, str], int]:
+    counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    for obs in observations:
+        is_v2_spike = v2_spike_sources is not None and obs.source_name in v2_spike_sources
+        if is_v2_spike:
+            continue
+        if obs.fees_usd is not None and obs.tvl_usd <= 0:
+            counts[(obs.source_name, obs.version, obs.chain)] += 1
+    return dict(counts)
+
+
 V2_PAIR_HOUR_QUERY = """
 query PairHourPage($first: Int!, $start: Int!, $end: Int!) {
-  pairHourDatas(
+  hourly: pairHourDatas(
     first: $first
     orderBy: hourStartUnix
     orderDirection: desc
@@ -1642,10 +1667,12 @@ def fetch_llama_pair_hour_rows(
             timeout=timeout,
             retries=retries,
         )
-        rows = data.get("pairHourDatas")
+        rows = data.get("hourly")
+        if rows is None:
+            rows = data.get("pairHourDatas")
         if not isinstance(rows, list):
             raise RuntimeError(
-                f"{source.name}: Expected 'pairHourDatas' list in llama query response."
+                f"{source.name}: Expected 'hourly' (or 'pairHourDatas') list in llama query response."
             )
         if not rows:
             break
@@ -3142,6 +3169,7 @@ def write_data_quality_audit_csv(
     input_rows: int,
     output_rows: int,
     rejected_counts: dict[tuple[str, str, str, str], int],
+    tvl_alias_sanity_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     by_reason: dict[str, int] = defaultdict(int)
@@ -3220,6 +3248,24 @@ def write_data_quality_audit_csv(
                     output_rows,
                 ]
             )
+        if tvl_alias_sanity_counts:
+            for (source, version, chain), count in sorted(
+                tvl_alias_sanity_counts.items(),
+                key=lambda kv: (-kv[1], kv[0][0], kv[0][1], kv[0][2]),
+            ):
+                writer.writerow(
+                    [
+                        "source_tvl_alias_sanity",
+                        source,
+                        version,
+                        chain,
+                        "fees_with_nonpositive_tvl_input",
+                        count,
+                        f"{(100.0 * count / input_rows) if input_rows else 0.0:.6f}",
+                        input_rows,
+                        output_rows,
+                    ]
+                )
 
 
 def next_weekly_occurrence(after_ts: int, weekday: int, hour: int) -> int:
@@ -4191,6 +4237,17 @@ def write_report_html(
     llama_diag_banner = ""
     if llama_diagnostics is not None:
         d = llama_diagnostics
+        zero_fetch_hint = ""
+        if d.counts.fetched_raw_rows == 0:
+            zero_fetch_hint = (
+                "<br/><strong>Most likely causes:</strong> "
+                "1) query alias missing (`hourly: pairHourDatas(...)`), "
+                "2) window does not overlap indexed data/startBlock, "
+                "3) subgraph not fully synced.<br/>"
+                "<code>curl -s -X POST -H 'Content-Type: application/json' "
+                f"-d '{{\"query\":\"{{ _meta {{ block {{ number }} }} pairHourDatas(first:1, orderBy:hourStartUnix, orderDirection:desc) {{ id hourStartUnix }} }}\"}}' "
+                f"'{html.escape(d.endpoint)}'</code>"
+            )
         llama_diag_banner = (
             "<p class='note'>"
             "<strong>Llama Diagnostics:</strong> "
@@ -4209,6 +4266,7 @@ def write_report_html(
             f"after_persistence={d.counts.after_persistence_filter}, "
             f"final={d.counts.final_ranked_rows}.<br/>"
             f"Status: {html.escape(d.empty_message)}"
+            f"{zero_fetch_hint}"
             "</p>"
         )
 
@@ -4677,6 +4735,26 @@ def main() -> int:
         return 1
 
     quality_input_rows = len(observations)
+    tvl_alias_sanity_counts = compute_source_tvl_alias_sanity(
+        observations=observations,
+        v2_spike_sources=v2_spike_sources,
+    )
+    if tvl_alias_sanity_counts:
+        worst = sorted(
+            tvl_alias_sanity_counts.items(),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )[:5]
+        print(
+            "TVL alias sanity: rows with fees but non-positive TVL detected. "
+            "Check GraphQL aliases for tvlUSD/totalValueLockedUSD/liquidityUSD.",
+            file=sys.stderr,
+        )
+        for (source, version, chain), count in worst:
+            print(
+                f"- {source} ({version}/{chain}): {count:,} rows (fees_with_nonpositive_tvl_input)",
+                file=sys.stderr,
+            )
     observations, quality_rejected_counts = filter_observations_with_quality_audit(
         observations=observations,
         min_tvl_usd=args.min_tvl_usd,
@@ -4866,6 +4944,7 @@ def main() -> int:
         input_rows=quality_input_rows,
         output_rows=quality_output_rows,
         rejected_counts=quality_rejected_counts,
+        tvl_alias_sanity_counts=tvl_alias_sanity_counts,
     )
     write_summary_md(
         summary_md,

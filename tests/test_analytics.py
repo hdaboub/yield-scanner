@@ -585,9 +585,12 @@ class AnalyticsTests(unittest.TestCase):
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0].source_name, "sushi-v2-fee-spikes-mainnet")
         self.assertEqual(
-            rejected.get(("uniswap-v4-mainnet-official", "v4", "ethereum", "implied_fee_rate_gt_10pct")),
+            rejected.get(("uniswap-v4-mainnet-official", "v4", "ethereum", "invalid_fee_tier")),
             1,
         )
+
+    def test_llama_pair_hour_query_uses_hourly_alias(self) -> None:
+        self.assertIn("hourly: pairHourDatas", scanner.V2_PAIR_HOUR_QUERY)
 
     def test_build_liquidity_schedule_finds_reliable_recurring_block(self) -> None:
         start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())

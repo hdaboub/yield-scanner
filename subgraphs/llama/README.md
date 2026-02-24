@@ -1,64 +1,70 @@
 # Llama Subgraph (The Graph Studio)
 
 ## Purpose
-This subgraph indexes Sushi/Uniswap-style DEX activity on Ethereum mainnet and produces hourly fee-yield primitives for yield-spike detection.
+This subgraph indexes Sushi/Uniswap-style DEX activity on Ethereum mainnet and produces hourly V2 fee-yield primitives used by the scanner/report app for spike detection.
 
-## Network
-- Ethereum mainnet
+## Source Of Truth
+- Droplet project path: `/root/llama`
+- Repo mirror path: `subgraphs/llama/`
 
-## Studio Endpoint (GraphQL)
-- `https://api.studio.thegraph.com/query/1742316/llama/v0.2.9`
+Sync command used:
+```bash
+rsync -az --delete \
+  --exclude '.git/' --exclude 'node_modules/' --exclude 'build/' --exclude 'generated/' --exclude '.yarn/cache/' \
+  root@134.199.135.19:/root/llama/ ./subgraphs/llama/
+```
 
-Use the latest deployed version label when querying.
+## Network + Endpoint
+- Network: Ethereum mainnet
+- Studio endpoint (current):
+  - `https://api.studio.thegraph.com/query/1742316/llama/v0.2.9`
 
 ## Key Entities
-- `PairHourData`:
-  - `pair` (address)
-  - `hourStartUnix` (hour bucket start)
-  - `swapCount`
-  - `fee0`, `fee1` (estimated LP fees in token units; `3/1000` of input-side swap amount)
-  - `reserve0`, `reserve1` (hourly reserve snapshot; v0.2.9 writes reserves during swaps from latest `Pair` reserves so hour buckets do not strictly depend on `Sync` in that hour)
-- `Pair`:
-  - `token0`, `token1`
-  - `reserve0`, `reserve1`
-  - `lastSyncTimestamp`, `lastSyncBlockNumber`
-- `Token`:
-  - `symbol`, `name`, `decimals` (best-effort via ERC20 `try_` calls)
-- `V2Swap` (raw event rows)
-- `V3Swap` (raw Sushi V3 pool swaps; no hourly rollup entity yet)
-- `V2SeedState`:
-  - progress state for pair seeding (`nextIndex`, `total`, `lastBlock`)
+- `PairHourData`: `pair`, `hourStartUnix`, `swapCount`, `fee0`, `fee1`, `reserve0`, `reserve1`
+- `Pair`: `id`, `token0`, `token1`, `reserve0`, `reserve1`, sync metadata
+- `Token`: `id`, `symbol`, `name`, `decimals`
+- `V2Swap`, `V3Swap`
+- `v2SeedStates`: `nextIndex`, `total`, `lastBlock`
 
-## Indexing Strategy
-- Current `startBlock` in this checked-in manifest: `24136052` (late-2025 / early-2026 range).
-- V2 factory uses a block handler `seedV2Pairs` to enumerate `allPairs(i)` from the factory and create templates for pairs that existed before `startBlock`.
-- Pair seeding progress is persisted in `V2SeedState`.
-- Swap/Sync indexing still starts from `startBlock` forward.
+## Deploy / Build (Subgraph Project)
+From `subgraphs/llama`:
+```bash
+yarn install
+yarn codegen
+yarn build
+# deploy command depends on your graph-cli auth/setup
+```
 
-## Yield Spike Scoring
-For pairs containing WETH (`0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`), define per-hour score:
+## Runtime Queries Used By Scanner
+Defined in `scanner.py`:
+- `LLAMA_RUNTIME_QUERY`: `_meta.block.number` + `v2SeedStates`
+- `V2_PAIR_HOUR_QUERY`: paged PairHourData query
+- `V2_PAIR_META_QUERY`, `V2_TOKEN_META_QUERY`: metadata enrichment
 
+Important: scanner now queries PairHourData with alias:
+```graphql
+hourly: pairHourDatas(...)
+```
+and accepts fallback to `pairHourDatas` for compatibility.
+
+## Empty-Result Troubleshooting
+If report diagnostics show `fetched_raw_rows=0`:
+1. Verify query alias and payload shape (`hourly` list for scanner expectations where relevant)
+2. Verify requested time window overlaps indexed data/startBlock
+3. Verify sync status via `_meta.block.number` and `v2SeedStates`
+
+Quick check:
+```bash
+curl -s -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ _meta { block { number } } v2SeedStates { id nextIndex total lastBlock } pairHourDatas(first:1, orderBy:hourStartUnix, orderDirection:desc){ id hourStartUnix } }"}' \
+  'https://api.studio.thegraph.com/query/1742316/llama/v0.2.9'
+```
+
+## Yield Spike Scoring Used In Reports
+For WETH pairs:
 - `score = feeWETH / reserveWETH`
-
-Derived metrics:
 - `hourly_yield_pct = score * 100`
-- `usd_per_1000_liquidity_hourly ~= score * 1000`
-- `rough_apr_pct = score * 24 * 365 * 100`
-
-Recommended filters:
-- Start with `min reserveWETH >= 10`, then raise toward `50+`
-- Start with `min swapCount >= 3`, then raise toward `10–30`
-- Optional persistence rule: top-K appears in at least `2` of last `6` hours
-
-## App Integration
-The reporting app includes a dedicated client at:
-- `src/thegraph/llama_client.py`
-
-Functions:
-- `fetchRecentPairHourData(...)`
-- `fetchPairsMeta(...)`
-- `computeWethScore(...)`
-
-Generated outputs in report runs:
-- `llama_pair_hour_data.csv`
-- `llama_weth_spike_rankings.csv`
+- `usd_per_1000_liquidity_hourly = score * 1000`
+- `spike_multiplier = score / baseline_median_score`
+- `persistence_hits` over trailing persistence window
