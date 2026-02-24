@@ -58,6 +58,8 @@ class AnalyticsTests(unittest.TestCase):
                     token1="0xtoken",
                     token0_symbol="WETH",
                     token1_symbol="TOK",
+                    token0_decimals=18,
+                    token1_decimals=18,
                     swap_count=20,
                     fee0_raw="1",
                     fee1_raw="0",
@@ -69,6 +71,8 @@ class AnalyticsTests(unittest.TestCase):
                     reserve1=2000.0,
                     weth_fee=score * 1000.0,
                     weth_reserve=1000.0,
+                    weth_fee_normalized=score * 1000.0,
+                    weth_reserve_normalized=1000.0,
                     score=score,
                 )
             )
@@ -81,7 +85,13 @@ class AnalyticsTests(unittest.TestCase):
             persistence_spike_multiplier=3.0,
             persistence_min_hits=2,
         )
-        ranked, counters = scanner.build_llama_spike_rankings(rows, thresholds)
+        ranked, counters = scanner.build_llama_spike_rankings(
+            rows,
+            thresholds,
+            min_baseline_observations=3,
+            baseline_epsilon=1e-10,
+            spike_multiplier_cap=250.0,
+        )
         self.assertTrue(ranked)
         top = ranked[0]
         self.assertGreaterEqual(top.spike_multiplier, 3.0)
@@ -108,6 +118,8 @@ class AnalyticsTests(unittest.TestCase):
                     token1="0xtoken",
                     token0_symbol="WETH",
                     token1_symbol="TOK",
+                    token0_decimals=18,
+                    token1_decimals=18,
                     swap_count=6,
                     fee0_raw="1",
                     fee1_raw="0",
@@ -119,6 +131,8 @@ class AnalyticsTests(unittest.TestCase):
                     reserve1=2000.0,
                     weth_fee=0.12,
                     weth_reserve=30.0,
+                    weth_fee_normalized=0.12,
+                    weth_reserve_normalized=30.0,
                     score=0.004,
                 )
             )
@@ -128,6 +142,9 @@ class AnalyticsTests(unittest.TestCase):
             persistence_hours=6,
             persistence_spike_multiplier=1.0,
             persistence_min_hits=1,
+            min_baseline_observations=3,
+            baseline_epsilon=1e-10,
+            spike_multiplier_cap=250.0,
             strict_mode=True,
             default_min_swap_count=10,
             default_min_weth_liquidity=50.0,

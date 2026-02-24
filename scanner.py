@@ -183,6 +183,8 @@ class LlamaPairHourRow:
     token1: str
     token0_symbol: str
     token1_symbol: str
+    token0_decimals: int | None
+    token1_decimals: int | None
     swap_count: int
     fee0_raw: str
     fee1_raw: str
@@ -194,6 +196,8 @@ class LlamaPairHourRow:
     reserve1: float
     weth_fee: float | None
     weth_reserve: float | None
+    weth_fee_normalized: float | None
+    weth_reserve_normalized: float | None
     score: float | None
 
 
@@ -226,12 +230,15 @@ class LlamaSpikeRankingRow:
     swap_count: int
     weth_reserve: float
     weth_fee: float
+    weth_reserve_normalized: float
+    weth_fee_normalized: float
     score: float
     hourly_yield_pct: float
     usd_per_1000_liquidity_hourly: float
     rough_apr_pct: float
     baseline_median_score: float
     spike_multiplier: float
+    spike_multiplier_capped: float
     persistence_hits: int
     notes_flags: str
 
@@ -522,6 +529,24 @@ def parse_args() -> argparse.Namespace:
         help="Minimum persistence hits required in llama spike ranking output (default: 2).",
     )
     parser.add_argument(
+        "--llama-min-baseline-observations",
+        type=int,
+        default=12,
+        help="Minimum trailing baseline observations required before a llama row is eligible (default: 12).",
+    )
+    parser.add_argument(
+        "--llama-baseline-epsilon",
+        type=float,
+        default=1e-10,
+        help="Minimum baseline median floor used for spike multiplier division guard (default: 1e-10).",
+    )
+    parser.add_argument(
+        "--llama-spike-multiplier-cap",
+        type=float,
+        default=250.0,
+        help="Cap applied to spike multiplier for ranking stability (default: 250.0).",
+    )
+    parser.add_argument(
         "--llama-strict-mode",
         action="store_true",
         help="Use strict llama thresholds first (100 WETH / 30 swaps), then fallback if sparse.",
@@ -603,6 +628,15 @@ def to_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def to_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def to_bool(value: Any, default: bool = True) -> bool:
@@ -1510,17 +1544,35 @@ def fetch_llama_pair_hour_rows(
         reserve1_dec = to_decimal(row.get("reserve1"))
         hour_ts = to_int(row.get("hourStartUnix"))
         swap_count = to_int(row.get("swapCount"))
+        token0_decimals = to_optional_int(token_meta.get(token0.lower(), ("", "", ""))[2]) if token0 else None
+        token1_decimals = to_optional_int(token_meta.get(token1.lower(), ("", "", ""))[2]) if token1 else None
         weth_fee: float | None = None
         weth_reserve: float | None = None
+        weth_fee_normalized: float | None = None
+        weth_reserve_normalized: float | None = None
         score: float | None = None
         if token0 == weth and reserve0_dec > 0:
+            weth_decimals = token0_decimals if token0_decimals is not None else 18
             weth_fee = float(fee0_dec)
             weth_reserve = float(reserve0_dec)
-            score = float(fee0_dec / reserve0_dec)
+            scale = Decimal(10) ** max(0, weth_decimals)
+            fee_norm = fee0_dec / scale
+            reserve_norm = reserve0_dec / scale
+            weth_fee_normalized = float(fee_norm)
+            weth_reserve_normalized = float(reserve_norm)
+            if reserve_norm > 0:
+                score = float(fee_norm / reserve_norm)
         elif token1 == weth and reserve1_dec > 0:
+            weth_decimals = token1_decimals if token1_decimals is not None else 18
             weth_fee = float(fee1_dec)
             weth_reserve = float(reserve1_dec)
-            score = float(fee1_dec / reserve1_dec)
+            scale = Decimal(10) ** max(0, weth_decimals)
+            fee_norm = fee1_dec / scale
+            reserve_norm = reserve1_dec / scale
+            weth_fee_normalized = float(fee_norm)
+            weth_reserve_normalized = float(reserve_norm)
+            if reserve_norm > 0:
+                score = float(fee_norm / reserve_norm)
 
         token0_symbol = token_meta.get(token0.lower(), ("", "", ""))[0] if token0 else ""
         token1_symbol = token_meta.get(token1.lower(), ("", "", ""))[0] if token1 else ""
@@ -1538,6 +1590,8 @@ def fetch_llama_pair_hour_rows(
                 token1=token1,
                 token0_symbol=token0_symbol,
                 token1_symbol=token1_symbol,
+                token0_decimals=token0_decimals,
+                token1_decimals=token1_decimals,
                 swap_count=swap_count,
                 fee0_raw=str(row.get("fee0", "")),
                 fee1_raw=str(row.get("fee1", "")),
@@ -1549,6 +1603,8 @@ def fetch_llama_pair_hour_rows(
                 reserve1=float(reserve1_dec),
                 weth_fee=weth_fee,
                 weth_reserve=weth_reserve,
+                weth_fee_normalized=weth_fee_normalized,
+                weth_reserve_normalized=weth_reserve_normalized,
                 score=score,
             )
         )
@@ -1559,6 +1615,10 @@ def fetch_llama_pair_hour_rows(
 def build_llama_spike_rankings(
     rows: Iterable[LlamaPairHourRow],
     thresholds: LlamaAdaptiveThresholds,
+    *,
+    min_baseline_observations: int,
+    baseline_epsilon: float,
+    spike_multiplier_cap: float,
 ) -> tuple[list[LlamaSpikeRankingRow], LlamaDropoffCounters]:
     grouped: dict[tuple[str, str], list[LlamaPairHourRow]] = defaultdict(list)
     fetched_rows = list(rows)
@@ -1577,6 +1637,9 @@ def build_llama_spike_rankings(
     baseline_seconds = thresholds.baseline_hours * SECONDS_PER_HOUR
     persistence_seconds = thresholds.persistence_hours * SECONDS_PER_HOUR
     spike_threshold = thresholds.persistence_spike_multiplier
+    min_baseline_obs = max(1, int(min_baseline_observations))
+    epsilon = max(0.0, float(baseline_epsilon))
+    spike_cap = max(0.0, float(spike_multiplier_cap))
 
     for _key, pair_rows in grouped.items():
         pair_rows.sort(key=lambda r: r.hour_start_unix)
@@ -1591,12 +1654,17 @@ def build_llama_spike_rankings(
             baseline_scores = [item.score for item in baseline_window if item.score is not None]
             baseline_median = statistics.median(baseline_scores) if baseline_scores else 0.0
             score = row.score if row.score is not None else 0.0
-            if baseline_median > 0:
+            baseline_ready = len(baseline_scores) >= min_baseline_obs and baseline_median >= epsilon
+            if baseline_ready and baseline_median > 0:
                 spike_multiplier = score / baseline_median
             else:
                 spike_multiplier = 0.0
-
-            is_spike = spike_multiplier >= spike_threshold if spike_threshold > 0 else True
+            spike_multiplier_capped = (
+                min(spike_multiplier, spike_cap) if spike_cap > 0 else spike_multiplier
+            )
+            is_spike = (
+                spike_multiplier_capped >= spike_threshold if spike_threshold > 0 else True
+            )
             persistence_window = [
                 item for item in persistence_window if item[0] >= row_ts - persistence_seconds
             ]
@@ -1610,24 +1678,25 @@ def build_llama_spike_rankings(
                 flags.append("new_pair_or_no_baseline")
             if row.swap_count < thresholds.min_swap_count:
                 flags.append("low_swaps")
-            if (row.weth_reserve or 0.0) < thresholds.min_weth_liquidity:
+            normalized_reserve = row.weth_reserve_normalized or 0.0
+            if normalized_reserve < thresholds.min_weth_liquidity:
                 flags.append("low_liquidity")
 
             qualifies = (
                 row.swap_count >= thresholds.min_swap_count
-                and (row.weth_reserve or 0.0) >= thresholds.min_weth_liquidity
+                and normalized_reserve >= thresholds.min_weth_liquidity
                 and row.reserve0 > 0
                 and row.reserve1 > 0
             )
             if row.swap_count >= thresholds.min_swap_count:
                 after_min_swaps += 1
-            if row.swap_count >= thresholds.min_swap_count and (row.weth_reserve or 0.0) >= thresholds.min_weth_liquidity:
+            if row.swap_count >= thresholds.min_swap_count and normalized_reserve >= thresholds.min_weth_liquidity:
                 after_min_weth += 1
-            if baseline_median > 0:
+            if qualifies and baseline_ready:
                 after_baseline_ready += 1
-            if qualifies and is_spike:
+            if qualifies and baseline_ready and is_spike:
                 after_spike_multiplier += 1
-            if qualifies and persistence_hits >= thresholds.persistence_min_hits:
+            if qualifies and baseline_ready and is_spike and persistence_hits >= thresholds.persistence_min_hits:
                 after_persistence += 1
                 ranked.append(
                     LlamaSpikeRankingRow(
@@ -1644,20 +1713,23 @@ def build_llama_spike_rankings(
                         swap_count=row.swap_count,
                         weth_reserve=(row.weth_reserve or 0.0),
                         weth_fee=(row.weth_fee or 0.0),
+                        weth_reserve_normalized=(row.weth_reserve_normalized or 0.0),
+                        weth_fee_normalized=(row.weth_fee_normalized or 0.0),
                         score=score,
                         hourly_yield_pct=score * 100.0,
                         usd_per_1000_liquidity_hourly=score * 1000.0,
                         rough_apr_pct=score * 24.0 * 365.0 * 100.0,
                         baseline_median_score=baseline_median,
                         spike_multiplier=spike_multiplier,
+                        spike_multiplier_capped=spike_multiplier_capped,
                         persistence_hits=persistence_hits,
-                        notes_flags=", ".join(flags),
+                        notes_flags=(", ".join(flags + (["spike_multiplier_capped"] if spike_cap > 0 and spike_multiplier > spike_cap else []))),
                     )
                 )
             baseline_window.append(row)
 
     ranked.sort(
-        key=lambda r: (r.spike_multiplier, r.score, r.persistence_hits, r.weth_reserve),
+        key=lambda r: (math.log1p(max(0.0, r.spike_multiplier_capped)), r.score, r.persistence_hits, r.weth_reserve_normalized),
         reverse=True,
     )
     counters = LlamaDropoffCounters(
@@ -1680,6 +1752,9 @@ def build_llama_rankings_with_fallback(
     persistence_hours: int,
     persistence_spike_multiplier: float,
     persistence_min_hits: int,
+    min_baseline_observations: int,
+    baseline_epsilon: float,
+    spike_multiplier_cap: float,
     strict_mode: bool,
     default_min_swap_count: int,
     default_min_weth_liquidity: float,
@@ -1725,7 +1800,13 @@ def build_llama_rankings_with_fallback(
             fallback_engaged=idx > 0,
             fallback_trace="",
         )
-        ranked, counters = build_llama_spike_rankings(rows, thresholds)
+        ranked, counters = build_llama_spike_rankings(
+            rows,
+            thresholds,
+            min_baseline_observations=min_baseline_observations,
+            baseline_epsilon=baseline_epsilon,
+            spike_multiplier_cap=spike_multiplier_cap,
+        )
         trace.append(f"{label}:{min_weth:.0f}/{min_swaps}->{len(ranked)}")
         final_ranked = ranked
         final_counters = counters
@@ -3474,6 +3555,8 @@ def write_llama_pair_hour_csv(
                 "token1",
                 "token0Symbol",
                 "token1Symbol",
+                "token0Decimals",
+                "token1Decimals",
                 "swapCount",
                 "fee0",
                 "fee1",
@@ -3495,6 +3578,8 @@ def write_llama_pair_hour_csv(
                     row.token1,
                     row.token0_symbol,
                     row.token1_symbol,
+                    (row.token0_decimals if row.token0_decimals is not None else ""),
+                    (row.token1_decimals if row.token1_decimals is not None else ""),
                     row.swap_count,
                     row.fee0_raw,
                     row.fee1_raw,
@@ -3527,12 +3612,15 @@ def write_llama_spike_csv(
                 "swapCount",
                 "wethReserve",
                 "wethFee",
+                "wethReserveNormalized",
+                "wethFeeNormalized",
                 "score",
                 "hourly_yield_pct",
                 "usd_per_1000_liquidity_hourly",
                 "rough_apr_pct",
                 "baseline_median_score",
                 "spike_multiplier",
+                "spike_multiplier_capped",
                 "persistence_hits",
                 "adaptive_min_swap_count",
                 "adaptive_min_weth_liquidity",
@@ -3555,12 +3643,15 @@ def write_llama_spike_csv(
                     row.swap_count,
                     f"{row.weth_reserve:.10f}",
                     f"{row.weth_fee:.10f}",
+                    f"{row.weth_reserve_normalized:.10f}",
+                    f"{row.weth_fee_normalized:.10f}",
                     f"{row.score:.12f}",
                     f"{row.hourly_yield_pct:.10f}",
                     f"{row.usd_per_1000_liquidity_hourly:.10f}",
                     f"{row.rough_apr_pct:.10f}",
                     f"{row.baseline_median_score:.12f}",
                     f"{row.spike_multiplier:.12f}",
+                    f"{row.spike_multiplier_capped:.12f}",
                     row.persistence_hits,
                     (thresholds.min_swap_count if thresholds is not None else ""),
                     (
@@ -3809,13 +3900,14 @@ def write_report_html(
             f"<td>{html.escape(row.hour_start_utc)}</td>"
             f"<td>{html.escape(row.hour_start_chicago)}</td>"
             f"<td>{row.swap_count}</td>"
-            f"<td>{row.weth_fee:.8f}</td>"
-            f"<td>{row.weth_reserve:.8f}</td>"
+            f"<td>{row.weth_fee_normalized:.8f}</td>"
+            f"<td>{row.weth_reserve_normalized:.8f}</td>"
             f"<td>{row.score:.10f}</td>"
             f"<td>{row.hourly_yield_pct:.6f}</td>"
             f"<td>{row.rough_apr_pct:.4f}</td>"
             f"<td>{row.baseline_median_score:.10f}</td>"
             f"<td>{row.spike_multiplier:.4f}</td>"
+            f"<td>{row.spike_multiplier_capped:.4f}</td>"
             f"<td>{row.persistence_hits}</td>"
             f"<td>{html.escape(row.notes_flags)}</td>"
             "</tr>"
@@ -3828,7 +3920,7 @@ def write_report_html(
             if llama_diagnostics is not None
             else "No V2 fee-yield spike rows matched adaptive threshold and persistence filters."
         )
-        llama_table_html = f"<tr><td colspan='23'>{empty_text}</td></tr>"
+        llama_table_html = f"<tr><td colspan='24'>{empty_text}</td></tr>"
     llama_endpoint_note = "<br/>".join(
         f"{html.escape(src.name)}: <code>{html.escape(src.endpoint)}</code>" for src in llama_sources
     )
@@ -4043,8 +4135,8 @@ def write_report_html(
               <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Source</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
               <th>Token0 Symbol</th><th>Token1 Symbol</th>
               <th>Hour UTC</th><th>Hour Chicago</th><th>Swap Count</th>
-              <th>feeWETH</th><th>reserveWETH</th><th>Score</th><th>Hourly Yield %</th><th>Rough APR %</th>
-              <th>Baseline Median Score</th><th>Spike Multiplier</th><th>Persistence Hits</th><th>Flags</th>
+              <th>feeWETH (normalized)</th><th>reserveWETH (normalized)</th><th>Score</th><th>Hourly Yield %</th><th>Rough APR %</th>
+              <th>Baseline Median Score</th><th>Spike Multiplier</th><th>Spike Multiplier (Capped)</th><th>Persistence Hits</th><th>Flags</th>
             </tr>
           </thead>
           <tbody>
@@ -4428,6 +4520,9 @@ def main() -> int:
             persistence_hours=args.llama_persistence_hours,
             persistence_spike_multiplier=args.llama_persistence_spike_multiplier,
             persistence_min_hits=args.llama_persistence_min_hits,
+            min_baseline_observations=args.llama_min_baseline_observations,
+            baseline_epsilon=args.llama_baseline_epsilon,
+            spike_multiplier_cap=args.llama_spike_multiplier_cap,
             strict_mode=args.llama_strict_mode,
             default_min_swap_count=args.v2_spike_min_swap_count,
             default_min_weth_liquidity=args.v2_spike_min_reserve_weth,
