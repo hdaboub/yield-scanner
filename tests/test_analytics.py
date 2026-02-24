@@ -9,6 +9,83 @@ from scanner import Observation, SourceConfig, normalize_row, rank_pools, resolv
 
 
 class AnalyticsTests(unittest.TestCase):
+    def test_choose_llama_adaptive_thresholds(self) -> None:
+        t_small = scanner.choose_llama_adaptive_thresholds(
+            total_rows=5_000,
+            min_swap_count_floor=0,
+            min_weth_liquidity_floor=0.0,
+            baseline_hours=72,
+            persistence_hours=6,
+            persistence_spike_multiplier=3.0,
+            persistence_min_hits=2,
+        )
+        self.assertEqual(t_small.min_swap_count, 3)
+        self.assertAlmostEqual(t_small.min_weth_liquidity, 10.0)
+
+        t_large = scanner.choose_llama_adaptive_thresholds(
+            total_rows=200_000,
+            min_swap_count_floor=20,
+            min_weth_liquidity_floor=80.0,
+            baseline_hours=72,
+            persistence_hours=6,
+            persistence_spike_multiplier=3.0,
+            persistence_min_hits=2,
+        )
+        self.assertEqual(t_large.min_swap_count, 20)
+        self.assertAlmostEqual(t_large.min_weth_liquidity, 80.0)
+
+    def test_build_llama_spike_rankings_uses_baseline_and_persistence(self) -> None:
+        base_ts = int(dt.datetime(2026, 2, 1, 0, 0, tzinfo=dt.timezone.utc).timestamp())
+        rows: list[scanner.LlamaPairHourRow] = []
+        for hour in range(10):
+            ts = base_ts + hour * 3600
+            score = 0.001
+            if hour in {8, 9}:
+                score = 0.005
+            rows.append(
+                scanner.LlamaPairHourRow(
+                    source_name="sushi-v2-fee-spikes-mainnet",
+                    version="v2",
+                    chain="ethereum",
+                    endpoint="https://example.invalid",
+                    hour_start_unix=ts,
+                    hour_start_utc=scanner.iso_hour(ts),
+                    hour_start_chicago=scanner.iso_hour_chicago(ts),
+                    pair="0xpair",
+                    token0="0xweth",
+                    token1="0xtoken",
+                    token0_symbol="WETH",
+                    token1_symbol="TOK",
+                    swap_count=20,
+                    fee0_raw="1",
+                    fee1_raw="0",
+                    reserve0_raw="1000",
+                    reserve1_raw="2000",
+                    fee0=1.0,
+                    fee1=0.0,
+                    reserve0=1000.0,
+                    reserve1=2000.0,
+                    weth_fee=score * 1000.0,
+                    weth_reserve=1000.0,
+                    score=score,
+                )
+            )
+        thresholds = scanner.choose_llama_adaptive_thresholds(
+            total_rows=len(rows),
+            min_swap_count_floor=0,
+            min_weth_liquidity_floor=0.0,
+            baseline_hours=72,
+            persistence_hours=6,
+            persistence_spike_multiplier=3.0,
+            persistence_min_hits=2,
+        )
+        ranked = scanner.build_llama_spike_rankings(rows, thresholds)
+        self.assertTrue(ranked)
+        top = ranked[0]
+        self.assertGreaterEqual(top.spike_multiplier, 3.0)
+        self.assertGreaterEqual(top.persistence_hits, 2)
+        self.assertEqual(top.pair, "0xpair")
+
     def test_rank_pools_orders_by_earning_potential_and_finds_best_window(self) -> None:
         start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())
 

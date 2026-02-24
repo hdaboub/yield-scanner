@@ -169,6 +169,71 @@ class V2YieldSpikeRow:
     rough_apr_pct: float
 
 
+@dataclass(frozen=True)
+class LlamaPairHourRow:
+    source_name: str
+    version: str
+    chain: str
+    endpoint: str
+    hour_start_unix: int
+    hour_start_utc: str
+    hour_start_chicago: str
+    pair: str
+    token0: str
+    token1: str
+    token0_symbol: str
+    token1_symbol: str
+    swap_count: int
+    fee0_raw: str
+    fee1_raw: str
+    reserve0_raw: str
+    reserve1_raw: str
+    fee0: float
+    fee1: float
+    reserve0: float
+    reserve1: float
+    weth_fee: float | None
+    weth_reserve: float | None
+    score: float | None
+
+
+@dataclass(frozen=True)
+class LlamaAdaptiveThresholds:
+    total_rows: int
+    min_swap_count: int
+    min_weth_liquidity: float
+    band: str
+    baseline_hours: int
+    persistence_hours: int
+    persistence_spike_multiplier: float
+    persistence_min_hits: int
+
+
+@dataclass(frozen=True)
+class LlamaSpikeRankingRow:
+    source_name: str
+    chain: str
+    hour_start_unix: int
+    hour_start_utc: str
+    hour_start_chicago: str
+    pair: str
+    token0: str
+    token1: str
+    token0_symbol: str
+    token1_symbol: str
+    swap_count: int
+    weth_reserve: float
+    weth_fee: float
+    score: float
+    hourly_yield_pct: float
+    usd_per_1000_liquidity_hourly: float
+    rough_apr_pct: float
+    baseline_median_score: float
+    spike_multiplier: float
+    persistence_hits: int
+    notes_flags: str
+
+
 def trimmed_mean(values: list[float], trim_ratio: float) -> float:
     if not values:
         return 0.0
@@ -370,20 +435,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--v2-spike-min-swap-count",
         type=int,
-        default=10,
-        help="Minimum swapCount per hour for v2 spike rows (default: 10).",
+        default=0,
+        help="Optional floor for swapCount per hour before adaptive v2/llama thresholds (default: 0).",
     )
     parser.add_argument(
         "--v2-spike-min-reserve-weth",
         type=float,
-        default=10.0,
-        help="Minimum reserve WETH per hour for v2 spike rows (default: 10.0).",
+        default=0.0,
+        help="Optional floor for reserveWETH before adaptive v2/llama thresholds (default: 0.0).",
     )
     parser.add_argument(
         "--v2-spike-top",
         type=int,
         default=100,
         help="Top N v2 spike rows to include in report sections (default: 100).",
+    )
+    parser.add_argument(
+        "--llama-baseline-hours",
+        type=int,
+        default=72,
+        help="Trailing hours used for per-pair baseline median score in llama spike ranking (default: 72).",
+    )
+    parser.add_argument(
+        "--llama-persistence-hours",
+        type=int,
+        default=6,
+        help="Trailing hours used for persistence_hits in llama spike ranking (default: 6).",
+    )
+    parser.add_argument(
+        "--llama-persistence-spike-multiplier",
+        type=float,
+        default=3.0,
+        help="Spike multiplier threshold used when counting persistence hits (default: 3.0).",
+    )
+    parser.add_argument(
+        "--llama-persistence-min-hits",
+        type=int,
+        default=2,
+        help="Minimum persistence hits required in llama spike ranking output (default: 2).",
     )
     parser.add_argument(
         "--min-tvl-usd",
@@ -992,6 +1081,18 @@ query PairMeta($ids: [String!]!) {
 """
 
 
+V2_TOKEN_META_QUERY = """
+query TokenMeta($ids: [String!]!) {
+  tokens(where: { id_in: $ids }) {
+    id
+    symbol
+    name
+    decimals
+  }
+}
+"""
+
+
 def _extract_pair_id(value: Any) -> str:
     if isinstance(value, dict):
         nested = value.get("id")
@@ -1045,6 +1146,292 @@ def _fetch_v2_pair_metadata(
             token1 = _extract_token_addr(row.get("token1"))
             out[pair_id] = (token0, token1)
     return out
+
+
+def _fetch_v2_token_metadata(
+    source: SourceConfig,
+    token_ids: Iterable[str],
+    timeout: int,
+    retries: int,
+) -> dict[str, tuple[str, str, str]]:
+    ids = sorted({tid.lower() for tid in token_ids if tid})
+    if not ids:
+        return {}
+    out: dict[str, tuple[str, str, str]] = {}
+    chunk_size = 200
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i : i + chunk_size]
+        data = graphql_query(
+            source=source,
+            query=V2_TOKEN_META_QUERY,
+            variables={"ids": chunk},
+            timeout=timeout,
+            retries=retries,
+        )
+        rows = data.get("tokens")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            token_id = str(row.get("id", "")).strip().lower()
+            if not token_id:
+                continue
+            symbol = str(row.get("symbol", "") or "").strip()
+            name = str(row.get("name", "") or "").strip()
+            decimals = str(row.get("decimals", "") or "").strip()
+            out[token_id] = (symbol, name, decimals)
+    return out
+
+
+def choose_llama_adaptive_thresholds(
+    total_rows: int,
+    min_swap_count_floor: int,
+    min_weth_liquidity_floor: float,
+    baseline_hours: int,
+    persistence_hours: int,
+    persistence_spike_multiplier: float,
+    persistence_min_hits: int,
+) -> LlamaAdaptiveThresholds:
+    rows = max(0, total_rows)
+    if rows < 10_000:
+        min_swaps = 3
+        min_weth = 10.0
+        band = "<10k rows"
+    elif rows < 100_000:
+        min_swaps = 8
+        min_weth = 25.0
+        band = "10k-100k rows"
+    else:
+        min_swaps = 15
+        min_weth = 50.0
+        band = ">100k rows"
+    return LlamaAdaptiveThresholds(
+        total_rows=rows,
+        min_swap_count=max(0, int(min_swap_count_floor), min_swaps),
+        min_weth_liquidity=max(0.0, float(min_weth_liquidity_floor), min_weth),
+        band=band,
+        baseline_hours=max(1, int(baseline_hours)),
+        persistence_hours=max(1, int(persistence_hours)),
+        persistence_spike_multiplier=max(0.0, float(persistence_spike_multiplier)),
+        persistence_min_hits=max(1, int(persistence_min_hits)),
+    )
+
+
+def fetch_llama_pair_hour_rows(
+    source: SourceConfig,
+    start_ts: int,
+    end_ts: int,
+    page_size: int,
+    max_pages: int | None,
+    timeout: int,
+    retries: int,
+) -> list[LlamaPairHourRow]:
+    cursor_end = end_ts - 1
+    pages = 0
+    raw_rows: list[dict[str, Any]] = []
+    pair_ids: set[str] = set()
+    while cursor_end >= start_ts:
+        data = graphql_query(
+            source=source,
+            query=V2_PAIR_HOUR_QUERY,
+            variables={"first": page_size, "start": start_ts, "end": cursor_end},
+            timeout=timeout,
+            retries=retries,
+        )
+        rows = data.get("pairHourDatas")
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                f"{source.name}: Expected 'pairHourDatas' list in llama query response."
+            )
+        if not rows:
+            break
+        min_hour_seen: int | None = None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pair_id = _extract_pair_id(row.get("pair"))
+            if not pair_id:
+                continue
+            hour_ts = to_int(row.get("hourStartUnix"))
+            if hour_ts <= 0:
+                continue
+            item = dict(row)
+            item["__pair_id"] = pair_id
+            raw_rows.append(item)
+            pair_ids.add(pair_id)
+            if min_hour_seen is None or hour_ts < min_hour_seen:
+                min_hour_seen = hour_ts
+        pages += 1
+        if max_pages is not None and pages >= max_pages:
+            break
+        if min_hour_seen is None:
+            break
+        next_cursor = min_hour_seen - 1
+        if next_cursor >= cursor_end:
+            next_cursor = cursor_end - 1
+        cursor_end = next_cursor
+
+    pair_meta = _fetch_v2_pair_metadata(source, pair_ids, timeout=timeout, retries=retries)
+    token_ids: set[str] = set()
+    for token0, token1 in pair_meta.values():
+        if token0:
+            token_ids.add(token0.lower())
+        if token1:
+            token_ids.add(token1.lower())
+    token_meta = _fetch_v2_token_metadata(
+        source=source,
+        token_ids=token_ids,
+        timeout=timeout,
+        retries=retries,
+    )
+    weth = source.weth_address.lower()
+
+    output: list[LlamaPairHourRow] = []
+    for row in raw_rows:
+        pair_id = str(row.get("__pair_id", "")).lower()
+        token0, token1 = pair_meta.get(pair_id, ("", ""))
+        fee0_dec = to_decimal(row.get("fee0"))
+        fee1_dec = to_decimal(row.get("fee1"))
+        reserve0_dec = to_decimal(row.get("reserve0"))
+        reserve1_dec = to_decimal(row.get("reserve1"))
+        hour_ts = to_int(row.get("hourStartUnix"))
+        swap_count = to_int(row.get("swapCount"))
+        weth_fee: float | None = None
+        weth_reserve: float | None = None
+        score: float | None = None
+        if token0 == weth and reserve0_dec > 0:
+            weth_fee = float(fee0_dec)
+            weth_reserve = float(reserve0_dec)
+            score = float(fee0_dec / reserve0_dec)
+        elif token1 == weth and reserve1_dec > 0:
+            weth_fee = float(fee1_dec)
+            weth_reserve = float(reserve1_dec)
+            score = float(fee1_dec / reserve1_dec)
+
+        token0_symbol = token_meta.get(token0.lower(), ("", "", ""))[0] if token0 else ""
+        token1_symbol = token_meta.get(token1.lower(), ("", "", ""))[0] if token1 else ""
+        output.append(
+            LlamaPairHourRow(
+                source_name=source.name,
+                version=source.version,
+                chain=source.chain,
+                endpoint=source.endpoint,
+                hour_start_unix=hour_ts,
+                hour_start_utc=iso_hour(hour_ts),
+                hour_start_chicago=iso_hour_chicago(hour_ts),
+                pair=pair_id,
+                token0=token0,
+                token1=token1,
+                token0_symbol=token0_symbol,
+                token1_symbol=token1_symbol,
+                swap_count=swap_count,
+                fee0_raw=str(row.get("fee0", "")),
+                fee1_raw=str(row.get("fee1", "")),
+                reserve0_raw=str(row.get("reserve0", "")),
+                reserve1_raw=str(row.get("reserve1", "")),
+                fee0=float(fee0_dec),
+                fee1=float(fee1_dec),
+                reserve0=float(reserve0_dec),
+                reserve1=float(reserve1_dec),
+                weth_fee=weth_fee,
+                weth_reserve=weth_reserve,
+                score=score,
+            )
+        )
+    output.sort(key=lambda r: (r.hour_start_unix, r.pair))
+    return output
+
+
+def build_llama_spike_rankings(
+    rows: Iterable[LlamaPairHourRow],
+    thresholds: LlamaAdaptiveThresholds,
+) -> list[LlamaSpikeRankingRow]:
+    grouped: dict[tuple[str, str], list[LlamaPairHourRow]] = defaultdict(list)
+    for row in rows:
+        if row.score is None or row.weth_reserve is None or row.weth_fee is None:
+            continue
+        grouped[(row.source_name, row.pair)].append(row)
+
+    ranked: list[LlamaSpikeRankingRow] = []
+    baseline_seconds = thresholds.baseline_hours * SECONDS_PER_HOUR
+    persistence_seconds = thresholds.persistence_hours * SECONDS_PER_HOUR
+    spike_threshold = thresholds.persistence_spike_multiplier
+
+    for _key, pair_rows in grouped.items():
+        pair_rows.sort(key=lambda r: r.hour_start_unix)
+        baseline_window: list[LlamaPairHourRow] = []
+        persistence_window: list[tuple[int, bool]] = []
+
+        for row in pair_rows:
+            row_ts = row.hour_start_unix
+            baseline_window = [
+                item for item in baseline_window if item.hour_start_unix >= row_ts - baseline_seconds
+            ]
+            baseline_scores = [item.score for item in baseline_window if item.score is not None]
+            baseline_median = statistics.median(baseline_scores) if baseline_scores else 0.0
+            score = row.score if row.score is not None else 0.0
+            if baseline_median > 0:
+                spike_multiplier = score / baseline_median
+            else:
+                spike_multiplier = 0.0
+
+            is_spike = spike_multiplier >= spike_threshold if spike_threshold > 0 else True
+            persistence_window = [
+                item for item in persistence_window if item[0] >= row_ts - persistence_seconds
+            ]
+            persistence_window.append((row_ts, is_spike))
+            persistence_hits = sum(1 for _ts, hit in persistence_window if hit)
+
+            flags: list[str] = []
+            if row.reserve0 <= 0 or row.reserve1 <= 0:
+                flags.append("zero_reserve_snapshot")
+            if baseline_median <= 0:
+                flags.append("new_pair_or_no_baseline")
+            if row.swap_count < thresholds.min_swap_count:
+                flags.append("low_swaps")
+            if (row.weth_reserve or 0.0) < thresholds.min_weth_liquidity:
+                flags.append("low_liquidity")
+
+            qualifies = (
+                row.swap_count >= thresholds.min_swap_count
+                and (row.weth_reserve or 0.0) >= thresholds.min_weth_liquidity
+                and row.reserve0 > 0
+                and row.reserve1 > 0
+            )
+            if qualifies and persistence_hits >= thresholds.persistence_min_hits:
+                ranked.append(
+                    LlamaSpikeRankingRow(
+                        source_name=row.source_name,
+                        chain=row.chain,
+                        hour_start_unix=row.hour_start_unix,
+                        hour_start_utc=row.hour_start_utc,
+                        hour_start_chicago=row.hour_start_chicago,
+                        pair=row.pair,
+                        token0=row.token0,
+                        token1=row.token1,
+                        token0_symbol=row.token0_symbol,
+                        token1_symbol=row.token1_symbol,
+                        swap_count=row.swap_count,
+                        weth_reserve=(row.weth_reserve or 0.0),
+                        weth_fee=(row.weth_fee or 0.0),
+                        score=score,
+                        hourly_yield_pct=score * 100.0,
+                        usd_per_1000_liquidity_hourly=score * 1000.0,
+                        rough_apr_pct=score * 24.0 * 365.0 * 100.0,
+                        baseline_median_score=baseline_median,
+                        spike_multiplier=spike_multiplier,
+                        persistence_hits=persistence_hits,
+                        notes_flags=", ".join(flags),
+                    )
+                )
+            baseline_window.append(row)
+
+    ranked.sort(
+        key=lambda r: (r.spike_multiplier, r.score, r.persistence_hits, r.weth_reserve),
+        reverse=True,
+    )
+    return ranked
 
 
 def fetch_v2_spike_observations(
@@ -2741,8 +3128,7 @@ def write_v2_spike_csv(path: Path, rows: Iterable[V2YieldSpikeRow]) -> None:
 
 def write_llama_pair_hour_csv(
     path: Path,
-    observations: Iterable[Observation],
-    v2_spike_sources: set[str],
+    rows: Iterable[LlamaPairHourRow],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -2752,44 +3138,109 @@ def write_llama_pair_hour_csv(
                 "source_name",
                 "version",
                 "chain",
-                "pair_id",
+                "hourStartUnix",
+                "hourStartUTC",
+                "hourStartChicago",
+                "pair",
                 "token0",
                 "token1",
-                "timestamp",
-                "hour_utc",
-                "hour_chicago",
-                "swap_count_proxy",
-                "fee_weth_proxy",
-                "reserve_weth_proxy",
-                "score_feeWETH_over_reserveWETH",
-                "hourly_yield_pct",
-                "usd_per_1000_liquidity_hourly",
+                "token0Symbol",
+                "token1Symbol",
+                "swapCount",
+                "fee0",
+                "fee1",
+                "reserve0",
+                "reserve1",
             ]
         )
-        for obs in observations:
-            if obs.source_name not in v2_spike_sources:
-                continue
-            token0, token1 = "", ""
-            if "/" in obs.pair:
-                token0, token1 = obs.pair.split("/", 1)
-            score = obs.hourly_yield if obs.hourly_yield is not None else 0.0
+        for row in rows:
             writer.writerow(
                 [
-                    obs.source_name,
-                    obs.version,
-                    obs.chain,
-                    obs.pool_id,
-                    token0,
-                    token1,
-                    obs.ts,
-                    iso_hour(obs.ts),
-                    iso_hour_chicago(obs.ts),
-                    int(max(0, round(obs.volume_usd))),
-                    f"{(obs.fees_usd if obs.fees_usd is not None else 0.0):.10f}",
-                    f"{obs.tvl_usd:.10f}",
-                    f"{score:.12f}",
-                    f"{(score * 100):.10f}",
-                    f"{(score * 1000):.10f}",
+                    row.source_name,
+                    row.version,
+                    row.chain,
+                    row.hour_start_unix,
+                    row.hour_start_utc,
+                    row.hour_start_chicago,
+                    row.pair,
+                    row.token0,
+                    row.token1,
+                    row.token0_symbol,
+                    row.token1_symbol,
+                    row.swap_count,
+                    row.fee0_raw,
+                    row.fee1_raw,
+                    row.reserve0_raw,
+                    row.reserve1_raw,
+                ]
+            )
+
+
+def write_llama_spike_csv(
+    path: Path,
+    rows: Iterable[LlamaSpikeRankingRow],
+    thresholds: LlamaAdaptiveThresholds | None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "source_name",
+                "chain",
+                "hourStartUnix",
+                "hourStartUTC",
+                "hourStartChicago",
+                "pair",
+                "token0",
+                "token1",
+                "token0Symbol",
+                "token1Symbol",
+                "swapCount",
+                "wethReserve",
+                "wethFee",
+                "score",
+                "hourly_yield_pct",
+                "usd_per_1000_liquidity_hourly",
+                "rough_apr_pct",
+                "baseline_median_score",
+                "spike_multiplier",
+                "persistence_hits",
+                "adaptive_min_swap_count",
+                "adaptive_min_weth_liquidity",
+                "notes_flags",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.source_name,
+                    row.chain,
+                    row.hour_start_unix,
+                    row.hour_start_utc,
+                    row.hour_start_chicago,
+                    row.pair,
+                    row.token0,
+                    row.token1,
+                    row.token0_symbol,
+                    row.token1_symbol,
+                    row.swap_count,
+                    f"{row.weth_reserve:.10f}",
+                    f"{row.weth_fee:.10f}",
+                    f"{row.score:.12f}",
+                    f"{row.hourly_yield_pct:.10f}",
+                    f"{row.usd_per_1000_liquidity_hourly:.10f}",
+                    f"{row.rough_apr_pct:.10f}",
+                    f"{row.baseline_median_score:.12f}",
+                    f"{row.spike_multiplier:.12f}",
+                    row.persistence_hits,
+                    (thresholds.min_swap_count if thresholds is not None else ""),
+                    (
+                        f"{thresholds.min_weth_liquidity:.6f}"
+                        if thresholds is not None
+                        else ""
+                    ),
+                    row.notes_flags,
                 ]
             )
 
@@ -2799,6 +3250,9 @@ def write_report_html(
     rankings: list[PoolRanking],
     schedules: list[ScheduleRecommendation],
     v2_spike_rows: list[V2YieldSpikeRow],
+    llama_rows: list[LlamaSpikeRankingRow],
+    llama_thresholds: LlamaAdaptiveThresholds | None,
+    llama_sources: list[SourceConfig],
     v2_spike_top: int,
     top_n: int,
     start_ts: int,
@@ -2912,30 +3366,55 @@ def write_report_html(
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
         "<tr><td colspan='13'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
-    top_v2_rows = v2_spike_rows[: max(0, v2_spike_top)]
-    v2_rows_html = []
-    for idx, row in enumerate(top_v2_rows, start=1):
-        v2_rows_html.append(
+    top_llama_rows = llama_rows[: max(0, v2_spike_top)]
+    llama_rows_html = []
+    for idx, row in enumerate(top_llama_rows, start=1):
+        llama_rows_html.append(
             "<tr>"
             f"<td>{idx}</td>"
+            f"<td>{html.escape(row.source_name)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
-            f"<td>{html.escape(row.pair_id)}</td>"
+            f"<td>{html.escape(row.pair)}</td>"
             f"<td>{html.escape(row.token0)}</td>"
             f"<td>{html.escape(row.token1)}</td>"
-            f"<td>{html.escape(row.ts_utc)}</td>"
-            f"<td>{html.escape(row.ts_chicago)}</td>"
+            f"<td>{html.escape(row.token0_symbol)}</td>"
+            f"<td>{html.escape(row.token1_symbol)}</td>"
+            f"<td>{html.escape(row.hour_start_utc)}</td>"
+            f"<td>{html.escape(row.hour_start_chicago)}</td>"
             f"<td>{row.swap_count}</td>"
-            f"<td>{row.fee_weth:.8f}</td>"
-            f"<td>{row.reserve_weth:.8f}</td>"
+            f"<td>{row.weth_fee:.8f}</td>"
+            f"<td>{row.weth_reserve:.8f}</td>"
             f"<td>{row.score:.10f}</td>"
             f"<td>{row.hourly_yield_pct:.6f}</td>"
             f"<td>{row.usd_per_1000_liquidity_hourly:.6f}</td>"
             f"<td>{row.rough_apr_pct:.4f}</td>"
+            f"<td>{row.baseline_median_score:.10f}</td>"
+            f"<td>{row.spike_multiplier:.4f}</td>"
+            f"<td>{row.persistence_hits}</td>"
+            f"<td>{html.escape(row.notes_flags)}</td>"
             "</tr>"
         )
-    v2_table_html = "\n".join(v2_rows_html) if v2_rows_html else (
-        "<tr><td colspan='14'>No V2 fee-yield spike rows matched filters.</td></tr>"
+    llama_table_html = "\n".join(llama_rows_html) if llama_rows_html else (
+        "<tr><td colspan='21'>No V2 fee-yield spike rows matched adaptive threshold and persistence filters.</td></tr>"
     )
+    llama_endpoint_note = "<br/>".join(
+        f"{html.escape(src.name)}: <code>{html.escape(src.endpoint)}</code>" for src in llama_sources
+    )
+    if not llama_endpoint_note:
+        llama_endpoint_note = "No llama sources configured."
+    if llama_thresholds is None:
+        llama_threshold_note = "Adaptive thresholds unavailable (no llama rows fetched)."
+    else:
+        llama_threshold_note = (
+            f"Adaptive thresholds ({html.escape(llama_thresholds.band)}): "
+            f"minSwapCount >= {llama_thresholds.min_swap_count}, "
+            f"minWETHLiquidity >= {llama_thresholds.min_weth_liquidity:.2f}, "
+            f"baselineWindow={llama_thresholds.baseline_hours}h, "
+            f"persistenceWindow={llama_thresholds.persistence_hours}h, "
+            f"spikeMultiplier>={llama_thresholds.persistence_spike_multiplier:.2f}, "
+            f"minPersistenceHits={llama_thresholds.persistence_min_hits}, "
+            f"rowsFetched={llama_thresholds.total_rows:,}."
+        )
 
     doc = f"""<!doctype html>
 <html lang="en">
@@ -3087,19 +3566,27 @@ def write_report_html(
     <section class="card">
       <h2>V2 Fee Yield Spikes (Ethereum / Sushi V2)</h2>
       <p class="note">
-        Ranked by score = feeWETH / reserveWETH from PairHourData. Hourly Yield % = score*100. Reward proxy in USD per $1k per hour = score*1000.
+        Endpoint(s): {llama_endpoint_note}
+      </p>
+      <p class="note">
+        {llama_threshold_note}
+      </p>
+      <p class="note">
+        Ranked by spike-vs-baseline (primary) and score (secondary), where score = feeWETH / reserveWETH from PairHourData.
       </p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Rank</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
+              <th>Rank</th><th>Source</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
+              <th>Token0 Symbol</th><th>Token1 Symbol</th>
               <th>Hour UTC</th><th>Hour Chicago</th><th>Swap Count</th>
               <th>feeWETH</th><th>reserveWETH</th><th>Score</th><th>Hourly Yield %</th><th>USD per $1k / hr</th><th>Rough APR %</th>
+              <th>Baseline Median Score</th><th>Spike Multiplier</th><th>Persistence Hits</th><th>Flags</th>
             </tr>
           </thead>
           <tbody>
-            {v2_table_html}
+            {llama_table_html}
           </tbody>
         </table>
       </div>
@@ -3434,6 +3921,62 @@ def main() -> int:
         min_swap_count=args.v2_spike_min_swap_count,
         min_reserve_weth=args.v2_spike_min_reserve_weth,
     )
+    llama_sources = [source for source in sources if source.source_type == "v2_spike"]
+    llama_pair_hour_rows: list[LlamaPairHourRow] = []
+    for source in llama_sources:
+        try:
+            source_rows = fetch_llama_pair_hour_rows(
+                source=source,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                page_size=effective_page_size(source, args.page_size),
+                max_pages=args.max_pages_per_source,
+                timeout=args.timeout,
+                retries=args.retries,
+            )
+            llama_pair_hour_rows.extend(source_rows)
+            print(
+                f"{source.name}: fetched {len(source_rows):,} llama PairHourData rows for report output.",
+                file=sys.stderr,
+            )
+        except Exception as err:  # noqa: BLE001
+            print(
+                f"{source.name}: failed to fetch llama pair-hour rows for report output: {err}",
+                file=sys.stderr,
+            )
+    llama_thresholds = (
+        choose_llama_adaptive_thresholds(
+            total_rows=len(llama_pair_hour_rows),
+            min_swap_count_floor=args.v2_spike_min_swap_count,
+            min_weth_liquidity_floor=args.v2_spike_min_reserve_weth,
+            baseline_hours=args.llama_baseline_hours,
+            persistence_hours=args.llama_persistence_hours,
+            persistence_spike_multiplier=args.llama_persistence_spike_multiplier,
+            persistence_min_hits=args.llama_persistence_min_hits,
+        )
+        if llama_pair_hour_rows
+        else None
+    )
+    llama_rankings = (
+        build_llama_spike_rankings(llama_pair_hour_rows, llama_thresholds)
+        if llama_thresholds is not None
+        else []
+    )
+    if llama_thresholds is not None:
+        print(
+            (
+                "Llama adaptive thresholds: "
+                f"rows={llama_thresholds.total_rows:,}, band={llama_thresholds.band}, "
+                f"minSwapCount={llama_thresholds.min_swap_count}, "
+                f"minWETHLiquidity={llama_thresholds.min_weth_liquidity:.2f}, "
+                f"baselineHours={llama_thresholds.baseline_hours}, "
+                f"persistenceHours={llama_thresholds.persistence_hours}, "
+                f"spikeMultiplier>={llama_thresholds.persistence_spike_multiplier:.2f}, "
+                f"minPersistenceHits={llama_thresholds.persistence_min_hits}"
+            ),
+            file=sys.stderr,
+        )
+        print(f"Llama ranked spikes: {len(llama_rankings):,}", file=sys.stderr)
     schedules = build_liquidity_schedule(
         rankings=rankings,
         observations=observations,
@@ -3461,8 +4004,8 @@ def main() -> int:
     write_rankings_csv(ranking_csv, rankings)
     write_schedule_csv(schedule_csv, schedules)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
-    write_llama_pair_hour_csv(llama_pair_hour_csv, observations, v2_spike_sources=v2_spike_sources)
-    write_v2_spike_csv(llama_rankings_csv, v2_spike_rows)
+    write_llama_pair_hour_csv(llama_pair_hour_csv, llama_pair_hour_rows)
+    write_llama_spike_csv(llama_rankings_csv, llama_rankings, llama_thresholds)
     write_data_quality_audit_csv(
         quality_csv,
         input_rows=quality_input_rows,
@@ -3488,6 +4031,9 @@ def main() -> int:
         rankings,
         schedules,
         v2_spike_rows,
+        llama_rankings,
+        llama_thresholds,
+        llama_sources,
         v2_spike_top=args.v2_spike_top,
         top_n=args.top,
         start_ts=start_ts,
