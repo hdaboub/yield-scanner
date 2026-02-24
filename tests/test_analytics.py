@@ -375,6 +375,42 @@ class AnalyticsTests(unittest.TestCase):
         self.assertEqual(rankings[0].best_window_start_ts, expected_start)
         self.assertEqual(rankings[0].best_window_end_ts, expected_start + 3600)
 
+    def test_rank_pools_writes_diagnostics_and_applies_winsorization(self) -> None:
+        start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())
+        rows = []
+        for hour in range(48):
+            ts = start + hour * 3600
+            y = 0.001
+            if hour == 47:
+                y = 0.2
+            rows.append(
+                Observation(
+                    source_name="s1",
+                    version="v3",
+                    chain="ethereum",
+                    pool_id="pool-x",
+                    pair="AAA/BBB",
+                    fee_tier=3000,
+                    ts=ts,
+                    volume_usd=100000.0,
+                    tvl_usd=100000.0,
+                    fees_usd=y * 100000.0,
+                    hourly_yield=y,
+                )
+            )
+        diags: list[scanner.PoolRankingDiagnostic] = []
+        rankings = rank_pools(
+            rows,
+            min_samples=24,
+            ranking_stats_min_tvl_usd=50000.0,
+            winsorize_percentile=0.95,
+            diagnostics_out=diags,
+        )
+        self.assertEqual(len(rankings), 1)
+        self.assertEqual(len(diags), 1)
+        self.assertGreater(diags[0].capped_hours, 0)
+        self.assertLess(diags[0].max_capped_hourly_yield_pct, diags[0].max_raw_hourly_yield_pct)
+
     def test_normalize_row_derives_fees_when_missing(self) -> None:
         source = SourceConfig(
             name="v4-test",
@@ -428,6 +464,30 @@ class AnalyticsTests(unittest.TestCase):
         assert obs is not None
         self.assertIsNone(obs.fees_usd)
         self.assertIsNone(obs.hourly_yield)
+
+    def test_normalize_row_uses_symbol_alias_when_symbol_missing(self) -> None:
+        source = SourceConfig(
+            name="v2-test",
+            version="v2",
+            chain="ethereum",
+            endpoint="https://example.invalid/graphql",
+            hourly_query="query {}",
+        )
+        row = {
+            "ts": 1700000000,
+            "volumeUSD": "1000",
+            "tvlUSD": "100000",
+            "pool": {
+                "id": "0xpool",
+                "feeTier": "3000",
+                "token0": {"id": "0x6b175474e89094c44da98b954eedeac495271d0f"},
+                "token1": {"id": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"},
+            },
+        }
+        obs = normalize_row(source, row)
+        self.assertIsNotNone(obs)
+        assert obs is not None
+        self.assertEqual(obs.pair, "DAI/WETH")
 
     def test_build_liquidity_schedule_finds_reliable_recurring_block(self) -> None:
         start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())

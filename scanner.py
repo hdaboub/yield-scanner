@@ -44,6 +44,15 @@ DAY_NAMES = [
 ]
 ENV_TOKEN_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
+# Common ERC-20 address aliases used when subgraphs omit token symbols.
+TOKEN_SYMBOL_OVERRIDES: dict[str, str] = {
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "WETH",
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": "USDC",
+    "0xdac17f958d2ee523a2206206994597c13d831ec7": "USDT",
+    "0x6b175474e89094c44da98b954eedeac495271d0f": "DAI",
+    "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599": "WBTC",
+}
+
 
 @dataclass(frozen=True)
 class SourceConfig:
@@ -102,6 +111,27 @@ class PoolRanking:
     best_window_start_ts: int
     best_window_end_ts: int
     score: float
+
+
+@dataclass(frozen=True)
+class PoolRankingDiagnostic:
+    source_name: str
+    version: str
+    chain: str
+    pool_id: str
+    pair: str
+    fee_tier: int
+    samples_raw: int
+    samples_after_tvl_floor: int
+    samples_after_hard_cap: int
+    ranking_tvl_floor_usd: float
+    winsorize_percentile: float
+    winsorize_cap_hourly_yield_pct: float
+    capped_hours: int
+    max_raw_hourly_yield_pct: float
+    max_capped_hourly_yield_pct: float
+    outlier_hours_raw: int
+    rule_triggered: str
 
 
 @dataclass(frozen=True)
@@ -588,6 +618,24 @@ def parse_args() -> argparse.Namespace:
         help="Trim ratio used for robust trimmed mean yield stats (default: 0.10).",
     )
     parser.add_argument(
+        "--ranking-stats-min-tvl-usd",
+        type=float,
+        default=25000.0,
+        help=(
+            "Additional TVL floor for non-llama ranking statistics (default: 25000). "
+            "Effective floor is max(--min-tvl-usd, --ranking-stats-min-tvl-usd)."
+        ),
+    )
+    parser.add_argument(
+        "--ranking-yield-winsorize-percentile",
+        type=float,
+        default=0.99,
+        help=(
+            "Winsorization percentile applied to hourly yield values inside ranking stats "
+            "to reduce extreme tails (default: 0.99)."
+        ),
+    )
+    parser.add_argument(
         "--local-timezone",
         default="America/Chicago",
         help="IANA timezone name used alongside UTC in report timestamps (default: America/Chicago).",
@@ -976,6 +1024,56 @@ def extract_symbol(pool: dict[str, Any], primary: str, secondary: str) -> str:
     return "UNKNOWN"
 
 
+def extract_token_id(pool: dict[str, Any], primary: str, secondary: str) -> str:
+    nested = pool.get(primary)
+    if isinstance(nested, dict):
+        token_id = nested.get("id")
+        if token_id:
+            return str(token_id).lower()
+    nested = pool.get(secondary)
+    if isinstance(nested, dict):
+        token_id = nested.get("id")
+        if token_id:
+            return str(token_id).lower()
+    flat_primary = pool.get(f"{primary}Id")
+    if flat_primary:
+        return str(flat_primary).lower()
+    flat_secondary = pool.get(f"{secondary}Id")
+    if flat_secondary:
+        return str(flat_secondary).lower()
+    return ""
+
+
+def _short_addr(addr: str) -> str:
+    if isinstance(addr, str) and addr.startswith("0x") and len(addr) >= 12:
+        return f"{addr[:6]}...{addr[-4:]}"
+    return addr
+
+
+def human_token_label(symbol: str, token_address: str = "") -> str:
+    clean_symbol = (symbol or "").strip()
+    if clean_symbol and clean_symbol.upper() != "UNKNOWN":
+        return clean_symbol
+    token_addr = (token_address or "").strip().lower()
+    if token_addr:
+        alias = TOKEN_SYMBOL_OVERRIDES.get(token_addr)
+        if alias:
+            return alias
+        return _short_addr(token_addr)
+    return "UNKNOWN"
+
+
+def human_pool_label(
+    token0_symbol: str,
+    token1_symbol: str,
+    token0_address: str = "",
+    token1_address: str = "",
+) -> str:
+    token0 = human_token_label(token0_symbol, token0_address)
+    token1 = human_token_label(token1_symbol, token1_address)
+    return f"{token0}/{token1}"
+
+
 def derive_hourly_fees_usd(volume_usd: float, fee_tier: int) -> float | None:
     # Uniswap fee tiers are in hundredths of a bip for v3-style static tiers
     # and should be within 0..1_000_000 (0%..100%). Values above that are
@@ -1065,9 +1163,16 @@ def normalize_row(source: SourceConfig, row: dict[str, Any]) -> Observation | No
         fees_usd = to_float(fees_usd_raw)
     fees_usd = sanitize_hourly_fees_usd(volume_usd=volume_usd, fee_tier=fee_tier, fees_usd=fees_usd)
 
+    token0_address = extract_token_id(pool, "token0", "currency0")
+    token1_address = extract_token_id(pool, "token1", "currency1")
     token0_symbol = extract_symbol(pool, "token0", "currency0")
     token1_symbol = extract_symbol(pool, "token1", "currency1")
-    pair = f"{token0_symbol}/{token1_symbol}"
+    pair = human_pool_label(
+        token0_symbol=token0_symbol,
+        token1_symbol=token1_symbol,
+        token0_address=token0_address,
+        token1_address=token1_address,
+    )
 
     hourly_yield = None
     if tvl_usd > 0 and fees_usd is not None:
@@ -1574,8 +1679,10 @@ def fetch_llama_pair_hour_rows(
             if reserve_norm > 0:
                 score = float(fee_norm / reserve_norm)
 
-        token0_symbol = token_meta.get(token0.lower(), ("", "", ""))[0] if token0 else ""
-        token1_symbol = token_meta.get(token1.lower(), ("", "", ""))[0] if token1 else ""
+        token0_symbol_raw = token_meta.get(token0.lower(), ("", "", ""))[0] if token0 else ""
+        token1_symbol_raw = token_meta.get(token1.lower(), ("", "", ""))[0] if token1 else ""
+        token0_symbol = human_token_label(token0_symbol_raw, token0)
+        token1_symbol = human_token_label(token1_symbol_raw, token1)
         output.append(
             LlamaPairHourRow(
                 source_name=source.name,
@@ -2734,6 +2841,9 @@ def rank_pools(
     min_tvl_usd: float = 0.0,
     max_hourly_yield_pct: float | None = None,
     trim_ratio: float = 0.10,
+    ranking_stats_min_tvl_usd: float = 0.0,
+    winsorize_percentile: float = 0.99,
+    diagnostics_out: list[PoolRankingDiagnostic] | None = None,
 ) -> list[PoolRanking]:
     grouped: dict[tuple[str, str, str, str, str, int], list[Observation]] = {}
     for obs in observations:
@@ -2748,22 +2858,33 @@ def rank_pools(
         grouped.setdefault(key, []).append(obs)
 
     rankings: list[PoolRanking] = []
+    if diagnostics_out is not None:
+        diagnostics_out.clear()
     for key, rows in grouped.items():
-        yield_rows = [r for r in rows if r.hourly_yield is not None and r.hourly_yield >= 0]
-        if min_tvl_usd > 0:
-            yield_rows = [r for r in yield_rows if r.tvl_usd >= min_tvl_usd]
+        raw_yield_rows = [r for r in rows if r.hourly_yield is not None and r.hourly_yield >= 0]
+        samples_raw = len(raw_yield_rows)
+        effective_tvl_floor = max(0.0, min_tvl_usd, ranking_stats_min_tvl_usd)
+        yield_rows = raw_yield_rows
+        if effective_tvl_floor > 0:
+            yield_rows = [r for r in yield_rows if r.tvl_usd >= effective_tvl_floor]
+        samples_after_tvl_floor = len(yield_rows)
         if max_hourly_yield_pct is not None:
             max_yield_ratio = max(0.0, max_hourly_yield_pct) / 100.0
             yield_rows = [r for r in yield_rows if (r.hourly_yield or 0.0) <= max_yield_ratio]
+        samples_after_hard_cap = len(yield_rows)
         if len(yield_rows) < min_samples:
             continue
 
-        yield_values = [r.hourly_yield for r in yield_rows if r.hourly_yield is not None]
+        yield_values_raw = [r.hourly_yield for r in yield_rows if r.hourly_yield is not None]
         fees_values = [r.fees_usd for r in yield_rows if r.fees_usd is not None]
         tvl_values = [r.tvl_usd for r in yield_rows if r.tvl_usd > 0]
 
-        if not yield_values or not tvl_values or not fees_values:
+        if not yield_values_raw or not tvl_values or not fees_values:
             continue
+        p = max(0.0, min(1.0, winsorize_percentile))
+        winsor_cap = percentile(yield_values_raw, p)
+        yield_values = [min(v, winsor_cap) for v in yield_values_raw]
+        capped_hours = sum(1 for v in yield_values_raw if v > winsor_cap)
 
         observed_hours = len(yield_rows)
         observed_days = observed_hours / 24
@@ -2816,7 +2937,7 @@ def rank_pools(
         trimmed_y = trimmed_mean(yield_values, trim_ratio)
         p90_y = percentile(yield_values, 0.90)
         max_y = max(yield_values)
-        outlier_hours = robust_outlier_count(yield_values)
+        outlier_hours = robust_outlier_count(yield_values_raw)
 
         # Composite score favors robust central tendency and durability over spikes.
         score = (p90_y * 0.45) + (trimmed_y * 0.35) + (median_y * 0.20)
@@ -2851,6 +2972,35 @@ def rank_pools(
                 score=score,
             )
         )
+        if diagnostics_out is not None:
+            rules: list[str] = []
+            if effective_tvl_floor > min_tvl_usd:
+                rules.append("ranking_tvl_floor")
+            if capped_hours > 0:
+                rules.append("winsorized")
+            if max_hourly_yield_pct is not None:
+                rules.append("hard_cap")
+            diagnostics_out.append(
+                PoolRankingDiagnostic(
+                    source_name=key[0],
+                    version=key[1],
+                    chain=key[2],
+                    pool_id=key[3],
+                    pair=key[4],
+                    fee_tier=key[5],
+                    samples_raw=samples_raw,
+                    samples_after_tvl_floor=samples_after_tvl_floor,
+                    samples_after_hard_cap=samples_after_hard_cap,
+                    ranking_tvl_floor_usd=effective_tvl_floor,
+                    winsorize_percentile=p,
+                    winsorize_cap_hourly_yield_pct=winsor_cap * 100.0,
+                    capped_hours=capped_hours,
+                    max_raw_hourly_yield_pct=max(yield_values_raw) * 100.0,
+                    max_capped_hourly_yield_pct=max_y * 100.0,
+                    outlier_hours_raw=outlier_hours,
+                    rule_triggered=("+".join(rules) if rules else "none"),
+                )
+            )
 
     rankings.sort(key=lambda r: r.score, reverse=True)
     return rankings
@@ -3332,6 +3482,57 @@ def write_rankings_csv(path: Path, rankings: Iterable[PoolRanking]) -> None:
                     iso_hour(r.best_window_start_ts),
                     iso_hour(r.best_window_end_ts),
                     f"{r.score:.12f}",
+                ]
+            )
+
+
+def write_pool_rankings_diagnostics_csv(
+    path: Path, rows: Iterable[PoolRankingDiagnostic]
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "source_name",
+                "version",
+                "chain",
+                "pool_id",
+                "pair",
+                "fee_tier",
+                "samples_raw",
+                "samples_after_tvl_floor",
+                "samples_after_hard_cap",
+                "ranking_tvl_floor_usd",
+                "winsorize_percentile",
+                "winsorize_cap_hourly_yield_pct",
+                "capped_hours",
+                "max_raw_hourly_yield_pct",
+                "max_capped_hourly_yield_pct",
+                "outlier_hours_raw",
+                "rule_triggered",
+            ]
+        )
+        for r in rows:
+            writer.writerow(
+                [
+                    r.source_name,
+                    r.version,
+                    r.chain,
+                    r.pool_id,
+                    r.pair,
+                    r.fee_tier,
+                    r.samples_raw,
+                    r.samples_after_tvl_floor,
+                    r.samples_after_hard_cap,
+                    f"{r.ranking_tvl_floor_usd:.6f}",
+                    f"{r.winsorize_percentile:.6f}",
+                    f"{r.winsorize_cap_hourly_yield_pct:.10f}",
+                    r.capped_hours,
+                    f"{r.max_raw_hourly_yield_pct:.10f}",
+                    f"{r.max_capped_hourly_yield_pct:.10f}",
+                    r.outlier_hours_raw,
+                    r.rule_triggered,
                 ]
             )
 
@@ -3879,10 +4080,11 @@ def write_report_html(
     llama_rows_html = []
     for idx, row in enumerate(top_llama_rows, start=1):
         exchange = infer_exchange_name(row.source_name)
-        pool_name = (
-            f"{row.token0_symbol}/{row.token1_symbol}"
-            if row.token0_symbol or row.token1_symbol
-            else f"{row.token0}/{row.token1}"
+        pool_name = human_pool_label(
+            token0_symbol=row.token0_symbol,
+            token1_symbol=row.token1_symbol,
+            token0_address=row.token0,
+            token1_address=row.token1,
         )
         llama_rows_html.append(
             "<tr>"
@@ -4091,6 +4293,7 @@ def write_report_html(
         <a href="llama_pair_hour_data.csv">llama_pair_hour_data.csv</a>
         <a href="llama_weth_spike_rankings.csv">llama_weth_spike_rankings.csv</a>
         <a href="llama_run_diagnostics.csv">llama_run_diagnostics.csv</a>
+        <a href="pool_rankings_diagnostics.csv">pool_rankings_diagnostics.csv</a>
         <a href="data_quality_audit.csv">data_quality_audit.csv</a>
       </div>
     </section>
@@ -4462,12 +4665,16 @@ def main() -> int:
     if not observations:
         print("No observations fetched. Check endpoints/query mappings.", file=sys.stderr)
 
+    ranking_diagnostics: list[PoolRankingDiagnostic] = []
     rankings = rank_pools(
         observations=observations,
         min_samples=args.min_samples,
         min_tvl_usd=args.min_tvl_usd,
         max_hourly_yield_pct=args.max_hourly_yield_pct,
         trim_ratio=args.yield_trim_ratio,
+        ranking_stats_min_tvl_usd=args.ranking_stats_min_tvl_usd,
+        winsorize_percentile=args.ranking_yield_winsorize_percentile,
+        diagnostics_out=ranking_diagnostics,
     )
     v2_spike_rows = build_v2_spike_rows(
         observations=observations,
@@ -4591,6 +4798,7 @@ def main() -> int:
 
     hourly_csv = output_dir / "hourly_observations.csv"
     ranking_csv = output_dir / "pool_rankings.csv"
+    ranking_diag_csv = output_dir / "pool_rankings_diagnostics.csv"
     summary_md = output_dir / "summary.md"
     schedule_csv = output_dir / "liquidity_schedule.csv"
     schedule_md = output_dir / "liquidity_schedule.md"
@@ -4603,6 +4811,7 @@ def main() -> int:
 
     write_hourly_csv(hourly_csv, observations)
     write_rankings_csv(ranking_csv, rankings)
+    write_pool_rankings_diagnostics_csv(ranking_diag_csv, ranking_diagnostics)
     write_schedule_csv(schedule_csv, schedules)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
     write_llama_pair_hour_csv(llama_pair_hour_csv, llama_pair_hour_rows)
@@ -4674,6 +4883,7 @@ def main() -> int:
     print("", file=sys.stderr)
     print(f"Wrote: {hourly_csv}", file=sys.stderr)
     print(f"Wrote: {ranking_csv}", file=sys.stderr)
+    print(f"Wrote: {ranking_diag_csv}", file=sys.stderr)
     print(f"Wrote: {summary_md}", file=sys.stderr)
     print(f"Wrote: {schedule_csv}", file=sys.stderr)
     print(f"Wrote: {schedule_md}", file=sys.stderr)
