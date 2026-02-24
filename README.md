@@ -146,10 +146,19 @@ Example source:
   "source_type": "v2_spike",
   "version": "v2",
   "chain": "ethereum",
-  "endpoint": "https://api.studio.thegraph.com/query/1742316/llama/v0.2.1",
+  "endpoint": "https://api.studio.thegraph.com/query/1742316/llama/v0.2.9",
   "weth_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 }
 ```
+
+Llama spike ranking defaults (production):
+
+- default thresholds: `--v2-spike-min-reserve-weth 50` and `--v2-spike-min-swap-count 10`
+- strict mode: `--llama-strict-mode` (starts at `100/30`)
+- fallback relaxation (if ranked rows `< --llama-min-ranked-target`, default 20):
+  - strict path: `100/30 -> 50/10 -> 25/5 -> 10/3`
+  - default path: `50/10 -> 25/5 -> 10/3`
+- ranking priority: `spike_multiplier` (score vs baseline median) then raw `score`, with persistence gating
 
 ## Schedule Logic
 

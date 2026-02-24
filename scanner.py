@@ -207,6 +207,8 @@ class LlamaAdaptiveThresholds:
     persistence_hours: int
     persistence_spike_multiplier: float
     persistence_min_hits: int
+    fallback_engaged: bool
+    fallback_trace: str
 
 
 @dataclass(frozen=True)
@@ -435,14 +437,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--v2-spike-min-swap-count",
         type=int,
-        default=0,
-        help="Optional floor for swapCount per hour before adaptive v2/llama thresholds (default: 0).",
+        default=10,
+        help="Default minimum swapCount per hour for v2/llama spike rows (default: 10).",
     )
     parser.add_argument(
         "--v2-spike-min-reserve-weth",
         type=float,
-        default=0.0,
-        help="Optional floor for reserveWETH before adaptive v2/llama thresholds (default: 0.0).",
+        default=50.0,
+        help="Default minimum reserveWETH for v2/llama spike rows (default: 50.0).",
     )
     parser.add_argument(
         "--v2-spike-top",
@@ -473,6 +475,29 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=2,
         help="Minimum persistence hits required in llama spike ranking output (default: 2).",
+    )
+    parser.add_argument(
+        "--llama-strict-mode",
+        action="store_true",
+        help="Use strict llama thresholds first (100 WETH / 30 swaps), then fallback if sparse.",
+    )
+    parser.add_argument(
+        "--llama-strict-min-swap-count",
+        type=int,
+        default=30,
+        help="Strict mode minimum swapCount per hour for llama ranking (default: 30).",
+    )
+    parser.add_argument(
+        "--llama-strict-min-reserve-weth",
+        type=float,
+        default=100.0,
+        help="Strict mode minimum reserveWETH for llama ranking (default: 100.0).",
+    )
+    parser.add_argument(
+        "--llama-min-ranked-target",
+        type=int,
+        default=20,
+        help="Target minimum llama ranked rows before stopping fallback relaxation (default: 20).",
     )
     parser.add_argument(
         "--min-tvl-usd",
@@ -1192,29 +1217,23 @@ def choose_llama_adaptive_thresholds(
     persistence_hours: int,
     persistence_spike_multiplier: float,
     persistence_min_hits: int,
+    *,
+    band: str = "default",
+    fallback_engaged: bool = False,
+    fallback_trace: str = "",
 ) -> LlamaAdaptiveThresholds:
     rows = max(0, total_rows)
-    if rows < 10_000:
-        min_swaps = 3
-        min_weth = 10.0
-        band = "<10k rows"
-    elif rows < 100_000:
-        min_swaps = 8
-        min_weth = 25.0
-        band = "10k-100k rows"
-    else:
-        min_swaps = 15
-        min_weth = 50.0
-        band = ">100k rows"
     return LlamaAdaptiveThresholds(
         total_rows=rows,
-        min_swap_count=max(0, int(min_swap_count_floor), min_swaps),
-        min_weth_liquidity=max(0.0, float(min_weth_liquidity_floor), min_weth),
+        min_swap_count=max(0, int(min_swap_count_floor)),
+        min_weth_liquidity=max(0.0, float(min_weth_liquidity_floor)),
         band=band,
         baseline_hours=max(1, int(baseline_hours)),
         persistence_hours=max(1, int(persistence_hours)),
         persistence_spike_multiplier=max(0.0, float(persistence_spike_multiplier)),
         persistence_min_hits=max(1, int(persistence_min_hits)),
+        fallback_engaged=fallback_engaged,
+        fallback_trace=fallback_trace,
     )
 
 
@@ -1432,6 +1451,80 @@ def build_llama_spike_rankings(
         reverse=True,
     )
     return ranked
+
+
+def build_llama_rankings_with_fallback(
+    rows: list[LlamaPairHourRow],
+    *,
+    baseline_hours: int,
+    persistence_hours: int,
+    persistence_spike_multiplier: float,
+    persistence_min_hits: int,
+    strict_mode: bool,
+    default_min_swap_count: int,
+    default_min_weth_liquidity: float,
+    strict_min_swap_count: int,
+    strict_min_weth_liquidity: float,
+    min_ranked_target: int,
+) -> tuple[list[LlamaSpikeRankingRow], LlamaAdaptiveThresholds]:
+    target = max(1, int(min_ranked_target))
+    tiers: list[tuple[int, float, str]] = []
+    if strict_mode:
+        tiers.append((strict_min_swap_count, strict_min_weth_liquidity, "strict"))
+    tiers.append((default_min_swap_count, default_min_weth_liquidity, "default"))
+    tiers.extend(
+        [
+            (5, 25.0, "fallback-25/5"),
+            (3, 10.0, "fallback-10/3"),
+        ]
+    )
+    # De-duplicate while preserving order.
+    seen: set[tuple[int, float]] = set()
+    uniq_tiers: list[tuple[int, float, str]] = []
+    for min_swaps, min_weth, label in tiers:
+        key = (max(0, int(min_swaps)), max(0.0, float(min_weth)))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq_tiers.append((key[0], key[1], label))
+
+    trace: list[str] = []
+    final_ranked: list[LlamaSpikeRankingRow] = []
+    selected_thresholds: LlamaAdaptiveThresholds | None = None
+    for idx, (min_swaps, min_weth, label) in enumerate(uniq_tiers):
+        thresholds = choose_llama_adaptive_thresholds(
+            total_rows=len(rows),
+            min_swap_count_floor=min_swaps,
+            min_weth_liquidity_floor=min_weth,
+            baseline_hours=baseline_hours,
+            persistence_hours=persistence_hours,
+            persistence_spike_multiplier=persistence_spike_multiplier,
+            persistence_min_hits=persistence_min_hits,
+            band=label,
+            fallback_engaged=idx > 0,
+            fallback_trace="",
+        )
+        ranked = build_llama_spike_rankings(rows, thresholds)
+        trace.append(f"{label}:{min_weth:.0f}/{min_swaps}->{len(ranked)}")
+        final_ranked = ranked
+        selected_thresholds = thresholds
+        if len(ranked) >= target:
+            break
+    assert selected_thresholds is not None
+    fallback_trace = " -> ".join(trace)
+    selected_thresholds = choose_llama_adaptive_thresholds(
+        total_rows=selected_thresholds.total_rows,
+        min_swap_count_floor=selected_thresholds.min_swap_count,
+        min_weth_liquidity_floor=selected_thresholds.min_weth_liquidity,
+        baseline_hours=selected_thresholds.baseline_hours,
+        persistence_hours=selected_thresholds.persistence_hours,
+        persistence_spike_multiplier=selected_thresholds.persistence_spike_multiplier,
+        persistence_min_hits=selected_thresholds.persistence_min_hits,
+        band=selected_thresholds.band,
+        fallback_engaged=("fallback" in selected_thresholds.band) or strict_mode,
+        fallback_trace=fallback_trace,
+    )
+    return final_ranked, selected_thresholds
 
 
 def fetch_v2_spike_observations(
@@ -3406,7 +3499,7 @@ def write_report_html(
         llama_threshold_note = "Adaptive thresholds unavailable (no llama rows fetched)."
     else:
         llama_threshold_note = (
-            f"Adaptive thresholds ({html.escape(llama_thresholds.band)}): "
+            f"Threshold selection ({html.escape(llama_thresholds.band)}): "
             f"minSwapCount >= {llama_thresholds.min_swap_count}, "
             f"minWETHLiquidity >= {llama_thresholds.min_weth_liquidity:.2f}, "
             f"baselineWindow={llama_thresholds.baseline_hours}h, "
@@ -3415,6 +3508,8 @@ def write_report_html(
             f"minPersistenceHits={llama_thresholds.persistence_min_hits}, "
             f"rowsFetched={llama_thresholds.total_rows:,}."
         )
+        if llama_thresholds.fallback_trace:
+            llama_threshold_note += f" Fallback path: {html.escape(llama_thresholds.fallback_trace)}."
 
     doc = f"""<!doctype html>
 <html lang="en">
@@ -3944,24 +4039,22 @@ def main() -> int:
                 f"{source.name}: failed to fetch llama pair-hour rows for report output: {err}",
                 file=sys.stderr,
             )
-    llama_thresholds = (
-        choose_llama_adaptive_thresholds(
-            total_rows=len(llama_pair_hour_rows),
-            min_swap_count_floor=args.v2_spike_min_swap_count,
-            min_weth_liquidity_floor=args.v2_spike_min_reserve_weth,
+    llama_thresholds: LlamaAdaptiveThresholds | None = None
+    llama_rankings: list[LlamaSpikeRankingRow] = []
+    if llama_pair_hour_rows:
+        llama_rankings, llama_thresholds = build_llama_rankings_with_fallback(
+            llama_pair_hour_rows,
             baseline_hours=args.llama_baseline_hours,
             persistence_hours=args.llama_persistence_hours,
             persistence_spike_multiplier=args.llama_persistence_spike_multiplier,
             persistence_min_hits=args.llama_persistence_min_hits,
+            strict_mode=args.llama_strict_mode,
+            default_min_swap_count=args.v2_spike_min_swap_count,
+            default_min_weth_liquidity=args.v2_spike_min_reserve_weth,
+            strict_min_swap_count=args.llama_strict_min_swap_count,
+            strict_min_weth_liquidity=args.llama_strict_min_reserve_weth,
+            min_ranked_target=args.llama_min_ranked_target,
         )
-        if llama_pair_hour_rows
-        else None
-    )
-    llama_rankings = (
-        build_llama_spike_rankings(llama_pair_hour_rows, llama_thresholds)
-        if llama_thresholds is not None
-        else []
-    )
     if llama_thresholds is not None:
         print(
             (
@@ -3972,7 +4065,8 @@ def main() -> int:
                 f"baselineHours={llama_thresholds.baseline_hours}, "
                 f"persistenceHours={llama_thresholds.persistence_hours}, "
                 f"spikeMultiplier>={llama_thresholds.persistence_spike_multiplier:.2f}, "
-                f"minPersistenceHits={llama_thresholds.persistence_min_hits}"
+                f"minPersistenceHits={llama_thresholds.persistence_min_hits}, "
+                f"fallbackTrace={llama_thresholds.fallback_trace}"
             ),
             file=sys.stderr,
         )

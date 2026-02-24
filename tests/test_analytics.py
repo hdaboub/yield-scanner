@@ -12,15 +12,16 @@ class AnalyticsTests(unittest.TestCase):
     def test_choose_llama_adaptive_thresholds(self) -> None:
         t_small = scanner.choose_llama_adaptive_thresholds(
             total_rows=5_000,
-            min_swap_count_floor=0,
-            min_weth_liquidity_floor=0.0,
+            min_swap_count_floor=10,
+            min_weth_liquidity_floor=50.0,
             baseline_hours=72,
             persistence_hours=6,
             persistence_spike_multiplier=3.0,
             persistence_min_hits=2,
+            band="default",
         )
-        self.assertEqual(t_small.min_swap_count, 3)
-        self.assertAlmostEqual(t_small.min_weth_liquidity, 10.0)
+        self.assertEqual(t_small.min_swap_count, 10)
+        self.assertAlmostEqual(t_small.min_weth_liquidity, 50.0)
 
         t_large = scanner.choose_llama_adaptive_thresholds(
             total_rows=200_000,
@@ -30,6 +31,7 @@ class AnalyticsTests(unittest.TestCase):
             persistence_hours=6,
             persistence_spike_multiplier=3.0,
             persistence_min_hits=2,
+            band="strict",
         )
         self.assertEqual(t_large.min_swap_count, 20)
         self.assertAlmostEqual(t_large.min_weth_liquidity, 80.0)
@@ -85,6 +87,56 @@ class AnalyticsTests(unittest.TestCase):
         self.assertGreaterEqual(top.spike_multiplier, 3.0)
         self.assertGreaterEqual(top.persistence_hits, 2)
         self.assertEqual(top.pair, "0xpair")
+
+    def test_llama_fallback_relaxes_when_sparse(self) -> None:
+        base_ts = int(dt.datetime(2026, 2, 1, 0, 0, tzinfo=dt.timezone.utc).timestamp())
+        rows: list[scanner.LlamaPairHourRow] = []
+        for hour in range(8):
+            ts = base_ts + hour * 3600
+            rows.append(
+                scanner.LlamaPairHourRow(
+                    source_name="sushi-v2-fee-spikes-mainnet",
+                    version="v2",
+                    chain="ethereum",
+                    endpoint="https://example.invalid",
+                    hour_start_unix=ts,
+                    hour_start_utc=scanner.iso_hour(ts),
+                    hour_start_chicago=scanner.iso_hour_chicago(ts),
+                    pair="0xpair",
+                    token0="0xweth",
+                    token1="0xtoken",
+                    token0_symbol="WETH",
+                    token1_symbol="TOK",
+                    swap_count=6,
+                    fee0_raw="1",
+                    fee1_raw="0",
+                    reserve0_raw="30",
+                    reserve1_raw="2000",
+                    fee0=1.0,
+                    fee1=0.0,
+                    reserve0=30.0,
+                    reserve1=2000.0,
+                    weth_fee=0.12,
+                    weth_reserve=30.0,
+                    score=0.004,
+                )
+            )
+        ranked, thresholds = scanner.build_llama_rankings_with_fallback(
+            rows,
+            baseline_hours=72,
+            persistence_hours=6,
+            persistence_spike_multiplier=1.0,
+            persistence_min_hits=1,
+            strict_mode=True,
+            default_min_swap_count=10,
+            default_min_weth_liquidity=50.0,
+            strict_min_swap_count=30,
+            strict_min_weth_liquidity=100.0,
+            min_ranked_target=1,
+        )
+        self.assertTrue(ranked)
+        self.assertEqual(thresholds.min_swap_count, 5)
+        self.assertAlmostEqual(thresholds.min_weth_liquidity, 25.0)
 
     def test_rank_pools_orders_by_earning_potential_and_finds_best_window(self) -> None:
         start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())
