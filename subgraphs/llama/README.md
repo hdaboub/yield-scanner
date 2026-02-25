@@ -1,70 +1,83 @@
-# Llama Subgraph (The Graph Studio)
+# Llama Subgraph (Ethereum Mainnet)
 
-## Purpose
-This subgraph indexes Sushi/Uniswap-style DEX activity on Ethereum mainnet and produces hourly V2 fee-yield primitives used by the scanner/report app for spike detection.
+This subgraph indexes Sushi/Uniswap-style activity on Ethereum mainnet and exposes V2 pair-hour fee/reserve primitives used by the yield scanner report.
 
-## Source Of Truth
-- Droplet project path: `/root/llama`
-- Repo mirror path: `subgraphs/llama/`
+## Endpoint
 
-Sync command used:
+- Studio GraphQL endpoint (current): `https://api.studio.thegraph.com/query/1742316/llama/v0.2.9`
+
+## What It Indexes
+
+- V2 factory + pair templates
+  - `PairHourData` (hourly aggregates)
+  - `Pair` / `Token` metadata
+  - raw `V2Swap` events
+- V3 factory + pool templates
+  - raw `V3Swap` events (no hourly rollup yet)
+
+## Key Entities Used by Scanner
+
+- `pairHourDatas`
+  - `pair`, `hourStartUnix`, `swapCount`, `fee0`, `fee1`, `reserve0`, `reserve1`
+- `pairs`
+  - `id`, `token0`, `token1`
+- `tokens` (best effort metadata)
+  - `id`, `symbol`, `name`, `decimals`
+- runtime health checks:
+  - `_meta { block { number } }`
+  - `v2SeedStates { nextIndex total lastBlock }`
+
+## Build and Deploy
+
 ```bash
-rsync -az --delete \
-  --exclude '.git/' --exclude 'node_modules/' --exclude 'build/' --exclude 'generated/' --exclude '.yarn/cache/' \
-  root@134.199.135.19:/root/llama/ ./subgraphs/llama/
-```
-
-## Network + Endpoint
-- Network: Ethereum mainnet
-- Studio endpoint (current):
-  - `https://api.studio.thegraph.com/query/1742316/llama/v0.2.9`
-
-## Key Entities
-- `PairHourData`: `pair`, `hourStartUnix`, `swapCount`, `fee0`, `fee1`, `reserve0`, `reserve1`
-- `Pair`: `id`, `token0`, `token1`, `reserve0`, `reserve1`, sync metadata
-- `Token`: `id`, `symbol`, `name`, `decimals`
-- `V2Swap`, `V3Swap`
-- `v2SeedStates`: `nextIndex`, `total`, `lastBlock`
-
-## Deploy / Build (Subgraph Project)
-From `subgraphs/llama`:
-```bash
-yarn install
+yarn
 yarn codegen
 yarn build
-# deploy command depends on your graph-cli auth/setup
+graph deploy llama -l v0.2.9
 ```
 
-## Runtime Queries Used By Scanner
-Defined in `scanner.py`:
-- `LLAMA_RUNTIME_QUERY`: `_meta.block.number` + `v2SeedStates`
-- `V2_PAIR_HOUR_QUERY`: paged PairHourData query
-- `V2_PAIR_META_QUERY`, `V2_TOKEN_META_QUERY`: metadata enrichment
+Use a newer label when releasing an updated deployment.
 
-Important: scanner now queries PairHourData with alias:
+## Scanner Integration Notes
+
+- The scanner treats this as a `source_type: v2_spike` source.
+- Llama hourly query responses must expose rows under top-level alias `hourly` for scanner compatibility.
+- Core ranking signal for WETH pairs:
+  - `score = feeWETH / reserveWETH`
+- Ranking uses:
+  - baseline median score,
+  - spike multiplier,
+  - persistence hits.
+
+## Example Queries
+
+Runtime health:
+
 ```graphql
-hourly: pairHourDatas(...)
-```
-and accepts fallback to `pairHourDatas` for compatibility.
-
-## Empty-Result Troubleshooting
-If report diagnostics show `fetched_raw_rows=0`:
-1. Verify query alias and payload shape (`hourly` list for scanner expectations where relevant)
-2. Verify requested time window overlaps indexed data/startBlock
-3. Verify sync status via `_meta.block.number` and `v2SeedStates`
-
-Quick check:
-```bash
-curl -s -X POST \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"{ _meta { block { number } } v2SeedStates { id nextIndex total lastBlock } pairHourDatas(first:1, orderBy:hourStartUnix, orderDirection:desc){ id hourStartUnix } }"}' \
-  'https://api.studio.thegraph.com/query/1742316/llama/v0.2.9'
+{
+  _meta { block { number } }
+  v2SeedStates(where: { id: "v2" }) { nextIndex total lastBlock }
+}
 ```
 
-## Yield Spike Scoring Used In Reports
-For WETH pairs:
-- `score = feeWETH / reserveWETH`
-- `hourly_yield_pct = score * 100`
-- `usd_per_1000_liquidity_hourly = score * 1000`
-- `spike_multiplier = score / baseline_median_score`
-- `persistence_hits` over trailing persistence window
+Pair-hour window:
+
+```graphql
+query PairHours($start: Int!, $end: Int!, $first: Int!, $afterId: String) {
+  hourly: pairHourDatas(
+    first: $first
+    orderBy: hourStartUnix
+    orderDirection: asc
+    where: { hourStartUnix_gte: $start, hourStartUnix_lte: $end, id_gt: $afterId }
+  ) {
+    id
+    pair { id }
+    hourStartUnix
+    fee0
+    fee1
+    reserve0
+    reserve1
+    swapCount
+  }
+}
+```

@@ -167,6 +167,160 @@ class ScheduleRecommendation:
 
 
 @dataclass(frozen=True)
+class SpikeRunStats:
+    source_name: str
+    version: str
+    chain: str
+    pool_id: str
+    pair: str
+    fee_tier: int
+    spike_threshold_usd_per_1000_hr: float
+    nonzero_hours: int
+    observed_hours: int
+    spike_hours: int
+    hit_rate_pct: float
+    history_quality: str
+    runs_total: int
+    run_length_p50: float
+    run_length_p75: float
+    run_length_p90: float
+    avg_usd_per_1000_hr_when_spiking: float
+    p90_usd_per_1000_hr_when_spiking: float
+
+
+@dataclass(frozen=True)
+class ScheduleEnhancedRow:
+    pool_rank: int
+    source_name: str
+    version: str
+    chain: str
+    pool_id: str
+    pair: str
+    fee_tier: int
+    reliability_hit_rate_pct: float
+    reliable_occurrences: int
+    threshold_hourly_yield_pct: float
+    threshold_hourly_usd_per_1000_liquidity: float
+    avg_block_hourly_yield_pct: float
+    p90_block_hourly_yield_pct: float
+    avg_block_hourly_usd_per_1000_liquidity: float
+    p90_block_hourly_usd_per_1000_liquidity: float
+    block_hours: int
+    next_add_ts: int
+    next_remove_ts: int
+    pool_score: float
+    baseline_usd_per_1000_hr: float
+    baseline_p75_usd_per_1000_hr: float
+    gross_block_usd_per_1000: float
+    gross_block_usd_per_1000_p90: float
+    baseline_block_usd_per_1000: float
+    baseline_block_p75_usd_per_1000: float
+    incremental_usd_per_1000: float
+    incremental_vs_baseline_p75_usd_per_1000: float
+    incremental_range_usd_per_1000: str
+    breakeven_move_cost_usd_per_1000: float
+    risk_adjusted_incremental_usd_per_1000: float
+    tvl_median_usd_est: float
+    max_deployable_usd_est: float
+    deploy_fraction_cap: float
+    capacity_flag: str
+    run_length_p50: float
+    run_length_p90: float
+    hit_rate_pct: float
+    history_quality: str
+    nonzero_hours: int
+    confidence_score: float
+
+
+@dataclass(frozen=True)
+class MovesDayCurveRow:
+    objective: str
+    move_cost_usd_per_move: float
+    deploy_usd: float
+    max_moves_per_day: int
+    min_hold_hours: int
+    cooldown_hours_between_moves: int
+    selected_blocks_count: int
+    selected_moves_count: int
+    total_net_usd: float
+    total_gross_usd: float
+    total_baseline_usd: float
+    notes: str
+
+
+@dataclass(frozen=True)
+class ScheduleRunDiagnosticsRow:
+    scenario_id: str
+    objective: str
+    deploy_usd: float
+    move_cost_usd_per_move: float
+    max_moves_per_day: int
+    min_hold_hours: int
+    total_schedule_rows: int
+    excluded_by_source_health: int
+    excluded_by_capacity: int
+    excluded_by_abs_capacity_floor: int
+    excluded_by_min_incremental: int
+    excluded_by_history_quality: int
+    excluded_by_invalid_fee_tier: int
+    excluded_by_min_tvl: int
+    excluded_by_hold_hours: int
+    candidates_after_filters: int
+    selected_blocks_count: int
+    reason_if_zero: str
+
+
+@dataclass(frozen=True)
+class ScheduleSummaryStats:
+    blocks_count: int
+    breakeven_min: float
+    breakeven_p25: float
+    breakeven_p50: float
+    breakeven_p75: float
+    breakeven_p90: float
+    breakeven_max: float
+    incremental_min: float
+    incremental_p25: float
+    incremental_p50: float
+    incremental_p75: float
+    incremental_p90: float
+    incremental_max: float
+    confidence_p50: float
+    confidence_p75: float
+    confidence_p90: float
+    history_ok_count: int
+    history_insufficient_count: int
+    history_ok_median_breakeven: float
+    history_insufficient_median_breakeven: float
+
+
+@dataclass(frozen=True)
+class SelectedPlanRow:
+    objective: str
+    move_cost_usd_per_move: float
+    deploy_usd: float
+    pool_rank: int
+    source_name: str
+    version: str
+    chain: str
+    pool_id: str
+    pair: str
+    next_add_ts: int
+    next_remove_ts: int
+    block_hours: int
+    effective_deploy_usd: float
+    expected_net_usd: float
+    expected_net_usd_per_1000: float
+    expected_gross_usd: float
+    expected_baseline_usd: float
+    breakeven_move_cost_usd_per_1000: float
+    breakeven_move_cost_usd: float
+    max_deployable_usd_est: float
+    confidence_score: float
+    capacity_flag: str
+
+
+@dataclass(frozen=True)
 class SourceFailure:
     source_name: str
     version: str
@@ -184,6 +338,22 @@ class SourceCheckpoint:
     cursor_end_ts: int | None
     pages_fetched: int
     rows_fetched: int
+
+
+@dataclass(frozen=True)
+class SourceHealthRow:
+    source_name: str
+    version: str
+    chain: str
+    input_rows: int
+    fees_with_nonpositive_tvl_input_count: int
+    fees_with_nonpositive_tvl_rate: float
+    tvl_below_floor_count: int
+    tvl_below_floor_rate: float
+    invalid_fee_tier_count: int
+    invalid_fee_tier_rate: float
+    excluded_from_schedule: bool
+    exclusion_reason: str
 
 
 @dataclass(frozen=True)
@@ -588,6 +758,14 @@ def parse_args() -> argparse.Namespace:
         help="Use strict llama thresholds first (100 WETH / 30 swaps), then fallback if sparse.",
     )
     parser.add_argument(
+        "--require-run-history-quality-ok",
+        action="store_true",
+        help=(
+            "Exclude pools with insufficient nonzero hourly history from schedule_enhanced "
+            "and moves/day frontier outputs."
+        ),
+    )
+    parser.add_argument(
         "--llama-strict-min-swap-count",
         type=int,
         default=30,
@@ -646,6 +824,129 @@ def parse_args() -> argparse.Namespace:
         default="America/Chicago",
         help="IANA timezone name used alongside UTC in report timestamps (default: America/Chicago).",
     )
+    parser.add_argument(
+        "--optimizer-objective",
+        choices=["raw", "risk_adjusted"],
+        default="risk_adjusted",
+        help="Objective used for move planning/frontier selection (default: risk_adjusted).",
+    )
+    parser.add_argument(
+        "--default-deploy-usd",
+        type=float,
+        default=10000.0,
+        help="Default deploy size (USD) used for execution panel and break-even scaling (default: 10000).",
+    )
+    parser.add_argument(
+        "--default-move-cost-usd",
+        type=float,
+        default=50.0,
+        help="Default move cost (USD per move) used for execution panel (default: 50).",
+    )
+    parser.add_argument(
+        "--default-max-moves-per-day",
+        type=int,
+        default=4,
+        help="Default max moves/day used for execution panel and default plan export (default: 4).",
+    )
+    parser.add_argument(
+        "--min-incremental-usd-per-1000",
+        type=float,
+        default=0.25,
+        help="Minimum incremental edge required to consider a block in optimizer (default: 0.25).",
+    )
+    parser.add_argument(
+        "--capacity-deploy-fraction-cap",
+        type=float,
+        default=0.02,
+        help="Estimated max deploy fraction of pool TVL before capacity warning (default: 0.02).",
+    )
+    parser.add_argument(
+        "--moves-min-hold-hours",
+        type=int,
+        default=1,
+        help="Minimum block hold hours required in optimizer (default: 1).",
+    )
+    parser.add_argument(
+        "--moves-cooldown-hours",
+        type=int,
+        default=0,
+        help="Cooldown hours required between selected moves (default: 0).",
+    )
+    parser.add_argument(
+        "--schedule-min-max-deployable-usd",
+        type=float,
+        default=10000.0,
+        help="Minimum estimated max deployable USD gate value used by optimizer (default: 10000).",
+    )
+    parser.add_argument(
+        "--schedule-min-max-deployable-mode",
+        choices=["fixed", "auto_p50", "auto_p75"],
+        default="auto_p50",
+        help=(
+            "How to resolve schedule max deployable gate: fixed uses --schedule-min-max-deployable-usd; "
+            "auto_p50/auto_p75 derive it from schedule_enhanced max_deployable_usd_est percentiles."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-absolute-min-max-deployable-usd",
+        type=float,
+        default=0.0,
+        help="Absolute hard floor for max deployable USD per block across all scenarios (default: 0).",
+    )
+    parser.add_argument(
+        "--schedule-min-tvl-usd",
+        type=float,
+        default=0.0,
+        help="Minimum median TVL USD per pool for schedule optimizer eligibility (default: 0).",
+    )
+    parser.add_argument(
+        "--max-fees-with-nonpositive-tvl-rate",
+        type=float,
+        default=0.10,
+        help="Exclude schedule sources if fees_with_nonpositive_tvl_input / input_rows exceeds this rate (default: 0.10).",
+    )
+    parser.add_argument(
+        "--max-invalid-fee-tier-rate",
+        type=float,
+        default=0.10,
+        help="Exclude schedule sources if invalid_fee_tier_count / input_rows exceeds this rate (default: 0.10).",
+    )
+    parser.add_argument(
+        "--charts-enable",
+        dest="charts_enable",
+        action="store_true",
+        help="Generate lightweight pool yield visualizations (PNG) and embed in report.",
+    )
+    parser.add_argument(
+        "--charts-disable",
+        dest="charts_enable",
+        action="store_false",
+        help="Disable chart generation.",
+    )
+    parser.add_argument(
+        "--charts-top-n",
+        type=int,
+        default=10,
+        help="Top N enhanced schedule pools to generate charts for (default: 10).",
+    )
+    parser.add_argument(
+        "--charts-window-days",
+        type=int,
+        default=30,
+        help="Window days for charts based on hourly observations (default: 30).",
+    )
+    parser.add_argument(
+        "--charts-output-dir",
+        default="charts",
+        help="Charts output subdirectory under output-dir (default: charts).",
+    )
+    parser.add_argument(
+        "--price-source",
+        choices=["coingecko", "none"],
+        default="coingecko",
+        help="Token price source for charts (default: coingecko).",
+    )
+    parser.set_defaults(charts_enable=True)
     return parser.parse_args()
 
 
@@ -1244,6 +1545,8 @@ def classify_quality_rejection(
     v2_spike_sources: set[str] | None = None,
 ) -> str | None:
     is_v2_spike = v2_spike_sources is not None and obs.source_name in v2_spike_sources
+    if (not is_v2_spike) and obs.fee_tier == 999_999:
+        return "invalid_fee_tier"
     implied_fee_rate = (
         (obs.fees_usd / obs.volume_usd)
         if obs.fees_usd is not None and obs.volume_usd > 0
@@ -3106,6 +3409,58 @@ def infer_exchange_name(source_name: str) -> str:
     return "Unknown"
 
 
+def looks_like_address(value: str) -> bool:
+    value = (value or "").strip().lower()
+    return value.startswith("0x") and len(value) == 42
+
+
+def metadata_quality_from_pair_label(pair: str) -> str:
+    if "/" not in pair:
+        return "low"
+    left, right = pair.split("/", 1)
+    if not left.strip() or not right.strip():
+        return "low"
+    if looks_like_address(left) or looks_like_address(right):
+        return "low"
+    return "high"
+
+
+def metadata_quality_from_token_symbols(
+    token0_symbol: str,
+    token1_symbol: str,
+    token0_address: str,
+    token1_address: str,
+) -> str:
+    s0 = (token0_symbol or "").strip()
+    s1 = (token1_symbol or "").strip()
+    if not s0 or not s1:
+        return "medium"
+    if looks_like_address(s0) or looks_like_address(s1):
+        return "low"
+    if s0.lower() == (token0_address or "").lower():
+        return "low"
+    if s1.lower() == (token1_address or "").lower():
+        return "low"
+    return "high"
+
+
+def pool_explorer_url(chain: str, pool_id: str) -> str | None:
+    if not looks_like_address(pool_id):
+        return None
+    base_by_chain = {
+        "ethereum": "https://etherscan.io/address/",
+        "mainnet": "https://etherscan.io/address/",
+        "base": "https://basescan.org/address/",
+        "arbitrum": "https://arbiscan.io/address/",
+        "polygon": "https://polygonscan.com/address/",
+        "bnb": "https://bscscan.com/address/",
+    }
+    base = base_by_chain.get((chain or "").lower())
+    if base is None:
+        return None
+    return f"{base}{pool_id}"
+
+
 def _weekly_hour_index(ts: int) -> int:
     dt_utc = dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
     return (dt_utc.weekday() * 24) + dt_utc.hour
@@ -3169,6 +3524,7 @@ def write_data_quality_audit_csv(
     input_rows: int,
     output_rows: int,
     rejected_counts: dict[tuple[str, str, str, str], int],
+    source_input_counts: dict[tuple[str, str, str], int] | None = None,
     tvl_alias_sanity_counts: dict[tuple[str, str, str], int] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3235,6 +3591,12 @@ def write_data_quality_audit_csv(
             rejected_counts.items(),
             key=lambda kv: (-kv[1], kv[0][0], kv[0][1], kv[0][2], kv[0][3]),
         ):
+            source_total = (
+                source_input_counts.get((source, version, chain), 0)
+                if source_input_counts is not None
+                else 0
+            )
+            denom = source_total if source_total > 0 else input_rows
             writer.writerow(
                 [
                     "source_reason",
@@ -3243,16 +3605,42 @@ def write_data_quality_audit_csv(
                     chain,
                     reason,
                     count,
-                    f"{(100.0 * count / input_rows) if input_rows else 0.0:.6f}",
+                    f"{(100.0 * count / denom) if denom else 0.0:.6f}",
                     input_rows,
                     output_rows,
                 ]
             )
+        if source_input_counts:
+            for (source, version, chain), source_total in sorted(source_input_counts.items()):
+                source_rejected = sum(
+                    count
+                    for (s, v, c, _), count in rejected_counts.items()
+                    if s == source and v == version and c == chain
+                )
+                writer.writerow(
+                    [
+                        "source_summary",
+                        source,
+                        version,
+                        chain,
+                        "rejected_rows",
+                        source_rejected,
+                        f"{(100.0 * source_rejected / source_total) if source_total else 0.0:.6f}",
+                        source_total,
+                        max(0, source_total - source_rejected),
+                    ]
+                )
         if tvl_alias_sanity_counts:
             for (source, version, chain), count in sorted(
                 tvl_alias_sanity_counts.items(),
                 key=lambda kv: (-kv[1], kv[0][0], kv[0][1], kv[0][2]),
             ):
+                source_total = (
+                    source_input_counts.get((source, version, chain), 0)
+                    if source_input_counts is not None
+                    else 0
+                )
+                denom = source_total if source_total > 0 else input_rows
                 writer.writerow(
                     [
                         "source_tvl_alias_sanity",
@@ -3261,13 +3649,234 @@ def write_data_quality_audit_csv(
                         chain,
                         "fees_with_nonpositive_tvl_input",
                         count,
-                        f"{(100.0 * count / input_rows) if input_rows else 0.0:.6f}",
+                        f"{(100.0 * count / denom) if denom else 0.0:.6f}",
                         input_rows,
                         output_rows,
                     ]
                 )
 
 
+def compute_source_health_rows(
+    source_input_counts: dict[tuple[str, str, str], int],
+    rejected_counts: dict[tuple[str, str, str, str], int],
+    tvl_alias_sanity_counts: dict[tuple[str, str, str], int] | None,
+    max_fees_with_nonpositive_tvl_rate: float,
+    max_invalid_fee_tier_rate: float,
+) -> list[SourceHealthRow]:
+    max_rate = max(0.0, max_fees_with_nonpositive_tvl_rate)
+    max_invalid_rate = max(0.0, max_invalid_fee_tier_rate)
+    tvl_alias_sanity_counts = tvl_alias_sanity_counts or {}
+    rows: list[SourceHealthRow] = []
+    for key, input_rows in sorted(source_input_counts.items()):
+        source_name, version, chain = key
+        fees_nonpos = tvl_alias_sanity_counts.get(key, 0)
+        tvl_below_floor = rejected_counts.get((source_name, version, chain, "tvl_below_floor"), 0)
+        invalid_fee_tier = rejected_counts.get((source_name, version, chain, "invalid_fee_tier"), 0)
+        denom = float(input_rows) if input_rows > 0 else 1.0
+        nonpos_rate = fees_nonpos / denom
+        tvl_floor_rate = tvl_below_floor / denom
+        invalid_fee_rate = invalid_fee_tier / denom
+        reasons: list[str] = []
+        if nonpos_rate > max_rate:
+            reasons.append(f"fees_with_nonpositive_tvl_rate {nonpos_rate:.4f} > {max_rate:.4f}")
+        if invalid_fee_rate > max_invalid_rate:
+            reasons.append(f"invalid_fee_tier_rate {invalid_fee_rate:.4f} > {max_invalid_rate:.4f}")
+        excluded = bool(reasons)
+        reason = "; ".join(reasons)
+        rows.append(
+            SourceHealthRow(
+                source_name=source_name,
+                version=version,
+                chain=chain,
+                input_rows=input_rows,
+                fees_with_nonpositive_tvl_input_count=fees_nonpos,
+                fees_with_nonpositive_tvl_rate=nonpos_rate,
+                tvl_below_floor_count=tvl_below_floor,
+                tvl_below_floor_rate=tvl_floor_rate,
+                invalid_fee_tier_count=invalid_fee_tier,
+                invalid_fee_tier_rate=invalid_fee_rate,
+                excluded_from_schedule=excluded,
+                exclusion_reason=reason,
+            )
+        )
+    return rows
+
+
+def write_source_health_csv(path: Path, rows: Iterable[SourceHealthRow]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "source_name",
+                "version",
+                "chain",
+                "input_rows",
+                "fees_with_nonpositive_tvl_input_count",
+                "fees_with_nonpositive_tvl_rate",
+                "tvl_below_floor_count",
+                "tvl_below_floor_rate",
+                "invalid_fee_tier_count",
+                "invalid_fee_tier_rate",
+                "excluded_from_schedule",
+                "exclusion_reason",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.source_name,
+                    row.version,
+                    row.chain,
+                    row.input_rows,
+                    row.fees_with_nonpositive_tvl_input_count,
+                    f"{row.fees_with_nonpositive_tvl_rate:.8f}",
+                    row.tvl_below_floor_count,
+                    f"{row.tvl_below_floor_rate:.8f}",
+                    row.invalid_fee_tier_count,
+                    f"{row.invalid_fee_tier_rate:.8f}",
+                    ("true" if row.excluded_from_schedule else "false"),
+                    row.exclusion_reason,
+                ]
+            )
+
+
+def _png_write_rgb(path: Path, width: int, height: int, pixels: list[tuple[int, int, int]]) -> None:
+    import struct
+    import zlib
+
+    width = max(1, int(width))
+    height = max(1, int(height))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter type
+        row_start = y * width
+        for x in range(width):
+            r, g, b = pixels[row_start + x]
+            raw.extend([max(0, min(255, int(r))), max(0, min(255, int(g))), max(0, min(255, int(b)))])
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack("!I", len(data))
+            + tag
+            + data
+            + struct.pack("!I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    idat = zlib.compress(bytes(raw), level=6)
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+    path.write_bytes(png)
+
+
+def _draw_line_on_pixels(
+    pixels: list[tuple[int, int, int]],
+    width: int,
+    height: int,
+    xs: list[int],
+    ys: list[int],
+    color: tuple[int, int, int],
+) -> None:
+    if len(xs) < 2 or len(ys) < 2:
+        return
+    for i in range(1, min(len(xs), len(ys))):
+        x0, y0 = xs[i - 1], ys[i - 1]
+        x1, y1 = xs[i], ys[i]
+        dx = abs(x1 - x0)
+        sx = 1 if x0 < x1 else -1
+        dy = -abs(y1 - y0)
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        x, y = x0, y0
+        while True:
+            if 0 <= x < width and 0 <= y < height:
+                idx = y * width + x
+                pixels[idx] = color
+            if x == x1 and y == y1:
+                break
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x += sx
+            if e2 <= dx:
+                err += dx
+                y += sy
+
+
+def generate_pool_charts(
+    chart_dir: Path,
+    observations: list[Observation],
+    schedule_rows: list[ScheduleEnhancedRow],
+    end_ts: int,
+    window_days: int,
+    top_n: int,
+) -> dict[str, dict[str, str]]:
+    window_start = end_ts - (max(1, window_days) * 24 * SECONDS_PER_HOUR)
+    by_pool: dict[tuple[str, str, str, str, str, int], list[Observation]] = defaultdict(list)
+    for obs in observations:
+        if obs.ts < window_start or obs.ts > end_ts:
+            continue
+        key = (obs.source_name, obs.version, obs.chain, obs.pool_id, obs.pair, obs.fee_tier)
+        by_pool[key].append(obs)
+
+    out: dict[str, dict[str, str]] = {}
+    for row in schedule_rows[: max(0, top_n)]:
+        key = (row.source_name, row.version, row.chain, row.pool_id, row.pair, row.fee_tier)
+        rows = sorted(by_pool.get(key, []), key=lambda x: x.ts)
+        if not rows:
+            continue
+        values = [(_metric_usd_per_1000(r) or 0.0) for r in rows]
+        if not values:
+            continue
+        width, height = 900, 260
+        bg = (245, 248, 252)
+        pixels = [bg] * (width * height)
+        # grid lines
+        for gy in range(0, height, 40):
+            for x in range(width):
+                pixels[gy * width + x] = (220, 226, 234)
+        min_v, max_v = min(values), max(values)
+        if abs(max_v - min_v) < 1e-12:
+            max_v = min_v + 1.0
+        xs = [int(i * (width - 1) / max(1, len(values) - 1)) for i in range(len(values))]
+        ys = [int((height - 1) - ((v - min_v) / (max_v - min_v)) * (height - 1)) for v in values]
+        _draw_line_on_pixels(pixels, width, height, xs, ys, (18, 87, 197))
+
+        safe_key = f"{row.chain}_{row.pool_id.lower()}"
+        ts_png = chart_dir / f"pool_{safe_key}.png"
+        _png_write_rgb(ts_png, width, height, pixels)
+
+        # heatmap (7x24)
+        heat_w, heat_h = 24 * 20, 7 * 22
+        heat_px = [(250, 250, 250)] * (heat_w * heat_h)
+        buckets: dict[tuple[int, int], list[float]] = defaultdict(list)
+        for obs in rows:
+            dtu = dt.datetime.fromtimestamp(obs.ts, tz=dt.timezone.utc)
+            buckets[(dtu.weekday(), dtu.hour)].append(_metric_usd_per_1000(obs) or 0.0)
+        vals = [statistics.fmean(v) for v in buckets.values() if v]
+        hmin, hmax = (min(vals), max(vals)) if vals else (0.0, 1.0)
+        if abs(hmax - hmin) < 1e-12:
+            hmax = hmin + 1.0
+        for day in range(7):
+            for hour in range(24):
+                v = statistics.fmean(buckets.get((day, hour), [0.0]))
+                t = (v - hmin) / (hmax - hmin)
+                r = int(255 * min(1.0, max(0.0, t)))
+                g = int(80 + 120 * (1.0 - min(1.0, max(0.0, t))))
+                b = int(255 * (1.0 - min(1.0, max(0.0, t))))
+                for yy in range(day * 22, min((day + 1) * 22, heat_h)):
+                    row_start = yy * heat_w
+                    for xx in range(hour * 20, min((hour + 1) * 20, heat_w)):
+                        heat_px[row_start + xx] = (r, g, b)
+        heat_png = chart_dir / f"heatmap_{safe_key}.png"
+        _png_write_rgb(heat_png, heat_w, heat_h, heat_px)
+
+        out[row.pool_id] = {
+            "timeseries": str(ts_png.relative_to(chart_dir.parent)),
+            "heatmap": str(heat_png.relative_to(chart_dir.parent)),
+        }
+    return out
 def next_weekly_occurrence(after_ts: int, weekday: int, hour: int) -> int:
     base = dt.datetime.fromtimestamp(after_ts, tz=dt.timezone.utc).replace(
         minute=0, second=0, microsecond=0
@@ -3453,6 +4062,727 @@ def build_liquidity_schedule(
         )
     )
     return recommendations
+
+
+def _pool_key(
+    source_name: str,
+    version: str,
+    chain: str,
+    pool_id: str,
+    pair: str,
+    fee_tier: int,
+) -> tuple[str, str, str, str, str, int]:
+    return (source_name, version, chain, pool_id, pair, fee_tier)
+
+
+def _metric_usd_per_1000(obs: Observation) -> float | None:
+    if obs.hourly_yield is None:
+        return None
+    return obs.hourly_yield * 1000.0
+
+
+def compute_spike_run_stats(
+    observations: Iterable[Observation],
+    schedules: list[ScheduleRecommendation],
+    end_ts: int,
+    window_days: int = 30,
+    global_min_threshold: float = 0.0,
+    threshold_floor: float = 0.001,
+    min_nonzero_hours: int = 24,
+    nonzero_eps: float = 1e-12,
+) -> list[SpikeRunStats]:
+    schedule_thresholds: dict[tuple[str, str, str, str, str, int], float] = {}
+    for row in schedules:
+        key = _pool_key(
+            row.source_name,
+            row.version,
+            row.chain,
+            row.pool_id,
+            row.pair,
+            row.fee_tier,
+        )
+        threshold = usd_per_1000_from_yield_pct(row.threshold_hourly_yield_pct)
+        prev = schedule_thresholds.get(key)
+        if prev is None or threshold > prev:
+            schedule_thresholds[key] = threshold
+
+    window_start = end_ts - (max(1, window_days) * 24 * SECONDS_PER_HOUR)
+    grouped: dict[tuple[str, str, str, str, str, int], list[Observation]] = defaultdict(list)
+    for obs in observations:
+        if obs.ts < window_start or obs.ts > end_ts:
+            continue
+        metric = _metric_usd_per_1000(obs)
+        if metric is None:
+            continue
+        grouped[_pool_key(obs.source_name, obs.version, obs.chain, obs.pool_id, obs.pair, obs.fee_tier)].append(obs)
+
+    stats_rows: list[SpikeRunStats] = []
+    for key, rows in grouped.items():
+        rows_sorted = sorted(rows, key=lambda x: x.ts)
+        metrics = [_metric_usd_per_1000(r) for r in rows_sorted]
+        metric_values = [m for m in metrics if m is not None]
+        if not metric_values:
+            continue
+        nonzero_values = [m for m in metric_values if m > max(0.0, nonzero_eps)]
+        nonzero_hours = len(nonzero_values)
+        history_quality = (
+            "ok"
+            if nonzero_hours >= max(1, min_nonzero_hours)
+            else "insufficient_nonzero_history"
+        )
+
+        scheduled_threshold = schedule_thresholds.get(key)
+        if scheduled_threshold is not None:
+            threshold = scheduled_threshold
+        elif history_quality == "ok":
+            threshold = percentile(nonzero_values, 0.90)
+        else:
+            threshold = max(0.0, global_min_threshold)
+        threshold = max(
+            threshold,
+            max(0.0, global_min_threshold),
+            max(0.0, threshold_floor),
+        )
+
+        spike_hours = 0
+        spike_values: list[float] = []
+        run_lengths: list[int] = []
+        current_run = 0
+        prev_ts: int | None = None
+
+        for obs in rows_sorted:
+            metric = _metric_usd_per_1000(obs)
+            if metric is None:
+                continue
+            is_spike = metric >= threshold
+            if is_spike:
+                spike_hours += 1
+                spike_values.append(metric)
+            if history_quality == "ok":
+                if is_spike and (
+                    prev_ts is None or obs.ts == prev_ts + SECONDS_PER_HOUR
+                ):
+                    current_run += 1
+                elif is_spike:
+                    if current_run > 0:
+                        run_lengths.append(current_run)
+                    current_run = 1
+                else:
+                    if current_run > 0:
+                        run_lengths.append(current_run)
+                        current_run = 0
+            prev_ts = obs.ts
+
+        if history_quality == "ok" and current_run > 0:
+            run_lengths.append(current_run)
+
+        observed_hours = len(rows_sorted)
+        runs_total = len(run_lengths) if history_quality == "ok" else 0
+        run_p50 = (
+            percentile([float(v) for v in run_lengths], 0.50)
+            if history_quality == "ok" and run_lengths
+            else 0.0
+        )
+        run_p75 = (
+            percentile([float(v) for v in run_lengths], 0.75)
+            if history_quality == "ok" and run_lengths
+            else 0.0
+        )
+        run_p90 = (
+            percentile([float(v) for v in run_lengths], 0.90)
+            if history_quality == "ok" and run_lengths
+            else 0.0
+        )
+        avg_spike = statistics.fmean(spike_values) if spike_values else 0.0
+        p90_spike = percentile(spike_values, 0.90) if spike_values else 0.0
+
+        stats_rows.append(
+            SpikeRunStats(
+                source_name=key[0],
+                version=key[1],
+                chain=key[2],
+                pool_id=key[3],
+                pair=key[4],
+                fee_tier=key[5],
+                spike_threshold_usd_per_1000_hr=threshold,
+                nonzero_hours=nonzero_hours,
+                observed_hours=observed_hours,
+                spike_hours=spike_hours,
+                hit_rate_pct=(100.0 * spike_hours / observed_hours) if observed_hours else 0.0,
+                history_quality=history_quality,
+                runs_total=runs_total,
+                run_length_p50=run_p50,
+                run_length_p75=run_p75,
+                run_length_p90=run_p90,
+                avg_usd_per_1000_hr_when_spiking=avg_spike,
+                p90_usd_per_1000_hr_when_spiking=p90_spike,
+            )
+        )
+
+    stats_rows.sort(
+        key=lambda r: (
+            r.chain,
+            r.source_name,
+            -r.hit_rate_pct,
+            -r.run_length_p90,
+            -r.avg_usd_per_1000_hr_when_spiking,
+        )
+    )
+    return stats_rows
+
+
+def compute_run_stats_sanity(
+    spike_stats: Iterable[SpikeRunStats],
+) -> tuple[float, float]:
+    rows = list(spike_stats)
+    if not rows:
+        return 0.0, 0.0
+    threshold_zero = sum(1 for row in rows if row.spike_threshold_usd_per_1000_hr <= 0.0)
+    always_spike_zero_avg = sum(
+        1
+        for row in rows
+        if row.hit_rate_pct >= 100.0 and row.avg_usd_per_1000_hr_when_spiking <= 0.0
+    )
+    total = float(len(rows))
+    return (100.0 * threshold_zero / total, 100.0 * always_spike_zero_avg / total)
+
+
+def get_baseline_rate_usd_per_1000_hr(
+    observations: Iterable[Observation],
+    end_ts: int,
+    chain: str | None = None,
+    version: str | None = None,
+    window_days: int = 30,
+    top_k_by_median_tvl: int = 200,
+) -> float:
+    median_v, _p75 = get_baseline_stats_usd_per_1000_hr(
+        observations=observations,
+        end_ts=end_ts,
+        chain=chain,
+        version=version,
+        window_days=window_days,
+        top_k_by_median_tvl=top_k_by_median_tvl,
+    )
+    return median_v
+
+
+def get_baseline_stats_usd_per_1000_hr(
+    observations: Iterable[Observation],
+    end_ts: int,
+    chain: str | None = None,
+    version: str | None = None,
+    window_days: int = 30,
+    top_k_by_median_tvl: int = 200,
+) -> tuple[float, float]:
+    window_start = end_ts - (max(1, window_days) * 24 * SECONDS_PER_HOUR)
+    eligible: list[Observation] = []
+    for obs in observations:
+        if obs.ts < window_start or obs.ts > end_ts:
+            continue
+        if obs.hourly_yield is None or obs.tvl_usd <= 0:
+            continue
+        if chain is not None and obs.chain != chain:
+            continue
+        if version is not None and obs.version != version:
+            continue
+        eligible.append(obs)
+
+    if not eligible:
+        return 0.0, 0.0
+
+    pool_tvls: dict[tuple[str, str, str, str, str, int], list[float]] = defaultdict(list)
+    for obs in eligible:
+        pool_tvls[_pool_key(obs.source_name, obs.version, obs.chain, obs.pool_id, obs.pair, obs.fee_tier)].append(obs.tvl_usd)
+    ranked_pools = sorted(
+        ((k, statistics.median(v)) for k, v in pool_tvls.items() if v),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    keep = {k for k, _ in ranked_pools[: max(1, top_k_by_median_tvl)]}
+    metrics = [
+        _metric_usd_per_1000(obs)
+        for obs in eligible
+        if _pool_key(obs.source_name, obs.version, obs.chain, obs.pool_id, obs.pair, obs.fee_tier) in keep
+    ]
+    metric_values = [m for m in metrics if m is not None]
+    if not metric_values:
+        return 0.0, 0.0
+    return statistics.median(metric_values), percentile(metric_values, 0.75)
+
+
+def build_schedule_enhanced_rows(
+    schedules: list[ScheduleRecommendation],
+    observations: Iterable[Observation],
+    rankings: list[PoolRanking],
+    spike_stats: list[SpikeRunStats],
+    end_ts: int,
+    baseline_window_days: int = 30,
+    baseline_top_k: int = 200,
+    require_history_quality_ok: bool = False,
+    min_incremental_usd_per_1000: float = 0.25,
+    capacity_deploy_fraction_cap: float = 0.02,
+    capacity_warning_usd: float = 10000.0,
+) -> list[ScheduleEnhancedRow]:
+    baseline_by_chain: dict[str, tuple[float, float]] = {}
+    chains = sorted({s.chain for s in schedules})
+    for chain in chains:
+        baseline_by_chain[chain] = get_baseline_stats_usd_per_1000_hr(
+            observations=observations,
+            end_ts=end_ts,
+            chain=chain,
+            version=None,
+            window_days=baseline_window_days,
+            top_k_by_median_tvl=baseline_top_k,
+        )
+    ranking_map = {
+        _pool_key(
+            row.source_name,
+            row.version,
+            row.chain,
+            row.pool_id,
+            row.pair,
+            row.fee_tier,
+        ): row
+        for row in rankings
+    }
+
+    spike_map = {
+        _pool_key(
+            row.source_name,
+            row.version,
+            row.chain,
+            row.pool_id,
+            row.pair,
+            row.fee_tier,
+        ): row
+        for row in spike_stats
+    }
+
+    rows: list[ScheduleEnhancedRow] = []
+    for schedule in schedules:
+        avg_block_hourly_usd = usd_per_1000_from_yield_pct(schedule.avg_block_hourly_yield_pct)
+        p90_block_hourly_usd = usd_per_1000_from_yield_pct(schedule.p90_block_hourly_yield_pct)
+        gross_block = avg_block_hourly_usd * schedule.block_hours
+        gross_block_p90 = p90_block_hourly_usd * schedule.block_hours
+        baseline_hr, baseline_p75_hr = baseline_by_chain.get(schedule.chain, (0.0, 0.0))
+        baseline_block = baseline_hr * schedule.block_hours
+        baseline_block_p75 = baseline_p75_hr * schedule.block_hours
+        incremental = gross_block - baseline_block
+        incremental_p75 = gross_block - baseline_block_p75
+        incremental_range = f"{incremental:.6f}..{incremental_p75:.6f}"
+        breakeven = max(incremental, 0.0)
+        key = _pool_key(
+            schedule.source_name,
+            schedule.version,
+            schedule.chain,
+            schedule.pool_id,
+            schedule.pair,
+            schedule.fee_tier,
+        )
+        run_stats = spike_map.get(key)
+        run_p50 = run_stats.run_length_p50 if run_stats is not None else 0.0
+        run_p90 = run_stats.run_length_p90 if run_stats is not None else 0.0
+        hit_rate = run_stats.hit_rate_pct if run_stats is not None else 0.0
+        history_quality = run_stats.history_quality if run_stats is not None else "insufficient_nonzero_history"
+        nonzero_hours = run_stats.nonzero_hours if run_stats is not None else 0
+        if require_history_quality_ok and history_quality != "ok":
+            continue
+        block_hours_safe = max(1, schedule.block_hours)
+        base = max(0.0, min(1.0, (hit_rate / 100.0) * (run_p50 / float(block_hours_safe))))
+        rel = max(0.0, min(1.0, schedule.reliability_hit_rate_pct / 100.0))
+        occ_target = max(2.0, float(schedule.block_hours * 2))
+        occ = max(
+            0.0,
+            min(
+                1.0,
+                math.log1p(max(0.0, float(schedule.reliable_occurrences)))
+                / math.log1p(occ_target),
+            ),
+        )
+        hist_penalty = 1.0 if history_quality == "ok" else 0.25
+        nz_penalty = max(0.0, min(1.0, nonzero_hours / 168.0))
+        confidence_score = max(0.0, min(1.0, base * rel * occ * hist_penalty * nz_penalty))
+        if incremental < min_incremental_usd_per_1000:
+            continue
+        ranking = ranking_map.get(key)
+        avg_tvl_usd = ranking.avg_tvl_usd if ranking is not None else 0.0
+        max_deployable_usd_est = max(0.0, avg_tvl_usd * max(0.0, capacity_deploy_fraction_cap))
+        capacity_flag = "LOW_CAPACITY" if max_deployable_usd_est < max(0.0, capacity_warning_usd) else "OK"
+        risk_adjusted_incremental = incremental * confidence_score
+        if history_quality != "ok":
+            risk_adjusted_incremental *= 0.25
+        rows.append(
+            ScheduleEnhancedRow(
+                pool_rank=schedule.pool_rank,
+                source_name=schedule.source_name,
+                version=schedule.version,
+                chain=schedule.chain,
+                pool_id=schedule.pool_id,
+                pair=schedule.pair,
+                fee_tier=schedule.fee_tier,
+                reliability_hit_rate_pct=schedule.reliability_hit_rate_pct,
+                reliable_occurrences=schedule.reliable_occurrences,
+                threshold_hourly_yield_pct=schedule.threshold_hourly_yield_pct,
+                threshold_hourly_usd_per_1000_liquidity=usd_per_1000_from_yield_pct(
+                    schedule.threshold_hourly_yield_pct
+                ),
+                avg_block_hourly_yield_pct=schedule.avg_block_hourly_yield_pct,
+                p90_block_hourly_yield_pct=schedule.p90_block_hourly_yield_pct,
+                avg_block_hourly_usd_per_1000_liquidity=avg_block_hourly_usd,
+                p90_block_hourly_usd_per_1000_liquidity=p90_block_hourly_usd,
+                block_hours=schedule.block_hours,
+                next_add_ts=schedule.next_add_ts,
+                next_remove_ts=schedule.next_remove_ts,
+                pool_score=schedule.pool_score,
+                baseline_usd_per_1000_hr=baseline_hr,
+                baseline_p75_usd_per_1000_hr=baseline_p75_hr,
+                gross_block_usd_per_1000=gross_block,
+                gross_block_usd_per_1000_p90=gross_block_p90,
+                baseline_block_usd_per_1000=baseline_block,
+                baseline_block_p75_usd_per_1000=baseline_block_p75,
+                incremental_usd_per_1000=incremental,
+                incremental_vs_baseline_p75_usd_per_1000=incremental_p75,
+                incremental_range_usd_per_1000=incremental_range,
+                breakeven_move_cost_usd_per_1000=breakeven,
+                risk_adjusted_incremental_usd_per_1000=risk_adjusted_incremental,
+                tvl_median_usd_est=avg_tvl_usd,
+                max_deployable_usd_est=max_deployable_usd_est,
+                deploy_fraction_cap=capacity_deploy_fraction_cap,
+                capacity_flag=capacity_flag,
+                run_length_p50=run_p50,
+                run_length_p90=run_p90,
+                hit_rate_pct=hit_rate,
+                history_quality=history_quality,
+                nonzero_hours=nonzero_hours,
+                confidence_score=confidence_score,
+            )
+        )
+    rows.sort(
+        key=lambda r: (
+            r.pool_rank,
+            -r.breakeven_move_cost_usd_per_1000,
+            -r.incremental_usd_per_1000,
+            -r.confidence_score,
+        )
+    )
+    return rows
+
+
+def _ranges_overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+    return start_a < end_b and start_b < end_a
+
+
+def _ranges_overlap_with_cooldown(
+    start_a: int,
+    end_a: int,
+    start_b: int,
+    end_b: int,
+    cooldown_hours: int,
+) -> bool:
+    cooldown_seconds = max(0, cooldown_hours) * SECONDS_PER_HOUR
+    return (start_a < (end_b + cooldown_seconds)) and (start_b < (end_a + cooldown_seconds))
+
+
+def _objective_incremental_per_1000(row: ScheduleEnhancedRow, objective: str) -> float:
+    if objective == "risk_adjusted":
+        return row.risk_adjusted_incremental_usd_per_1000
+    return row.incremental_usd_per_1000
+
+
+def select_schedule_plan(
+    schedule_rows: list[ScheduleEnhancedRow],
+    objective: str,
+    move_cost_usd_per_move: float,
+    deploy_usd: float,
+    max_moves_per_day: int,
+    min_hold_hours: int,
+    cooldown_hours_between_moves: int,
+    schedule_min_max_deployable_usd: float,
+    schedule_absolute_min_max_deployable_usd: float = 0.0,
+    schedule_min_tvl_usd: float = 0.0,
+) -> list[SelectedPlanRow]:
+    required_capacity = min(max(0.0, deploy_usd), max(0.0, schedule_min_max_deployable_usd))
+    abs_min_deploy = max(0.0, schedule_absolute_min_max_deployable_usd)
+    min_tvl = max(0.0, schedule_min_tvl_usd)
+    candidates: list[tuple[ScheduleEnhancedRow, float, float, float, float]] = []
+    for item in schedule_rows:
+        if item.block_hours < max(1, min_hold_hours):
+            continue
+        if item.max_deployable_usd_est < required_capacity:
+            continue
+        if item.max_deployable_usd_est < abs_min_deploy:
+            continue
+        est_tvl = (
+            item.max_deployable_usd_est / item.deploy_fraction_cap
+            if item.deploy_fraction_cap > 0
+            else 0.0
+        )
+        if est_tvl < min_tvl:
+            continue
+        effective_deploy_usd = min(max(0.0, deploy_usd), max(0.0, item.max_deployable_usd_est))
+        if effective_deploy_usd <= 0:
+            continue
+        effective_scale = effective_deploy_usd / 1000.0
+        obj_incremental = _objective_incremental_per_1000(item, objective)
+        net_usd = (effective_scale * obj_incremental) - move_cost_usd_per_move
+        if net_usd <= 0:
+            continue
+        gross_usd = effective_scale * item.gross_block_usd_per_1000
+        baseline_usd = effective_scale * item.baseline_block_usd_per_1000
+        candidates.append((item, net_usd, gross_usd, baseline_usd, effective_deploy_usd))
+    candidates.sort(
+        key=lambda item: (
+            item[1] / float(max(1, item[0].block_hours)),
+            item[1],
+            item[0].confidence_score,
+        ),
+        reverse=True,
+    )
+    selected: list[tuple[ScheduleEnhancedRow, float, float, float, float]] = []
+    day_move_counts: dict[str, int] = defaultdict(int)
+    for candidate in candidates:
+        row, net_usd, gross_usd, baseline_usd, effective_deploy_usd = candidate
+        day_key = dt.datetime.fromtimestamp(
+            row.next_add_ts, tz=dt.timezone.utc
+        ).strftime("%Y-%m-%d")
+        if day_move_counts[day_key] >= max_moves_per_day:
+            continue
+        overlap = False
+        for picked, *_ in selected:
+            if _ranges_overlap_with_cooldown(
+                row.next_add_ts,
+                row.next_remove_ts,
+                picked.next_add_ts,
+                picked.next_remove_ts,
+                cooldown_hours_between_moves,
+            ):
+                overlap = True
+                break
+        if overlap:
+            continue
+        selected.append(candidate)
+        day_move_counts[day_key] += 1
+
+    plan_rows: list[SelectedPlanRow] = []
+    for row, net_usd, gross_usd, baseline_usd, effective_deploy_usd in selected:
+        max_deploy = row.max_deployable_usd_est
+        capacity_flag = row.capacity_flag
+        if effective_deploy_usd < deploy_usd and max_deploy > 0:
+            capacity_flag = "LOW_CAPACITY"
+        effective_scale = max(1e-9, effective_deploy_usd / 1000.0)
+        plan_rows.append(
+            SelectedPlanRow(
+                objective=objective,
+                move_cost_usd_per_move=move_cost_usd_per_move,
+                deploy_usd=deploy_usd,
+                pool_rank=row.pool_rank,
+                source_name=row.source_name,
+                version=row.version,
+                chain=row.chain,
+                pool_id=row.pool_id,
+                pair=row.pair,
+                next_add_ts=row.next_add_ts,
+                next_remove_ts=row.next_remove_ts,
+                block_hours=row.block_hours,
+                effective_deploy_usd=effective_deploy_usd,
+                expected_net_usd=net_usd,
+                expected_net_usd_per_1000=(net_usd / effective_scale),
+                expected_gross_usd=gross_usd,
+                expected_baseline_usd=baseline_usd,
+                breakeven_move_cost_usd_per_1000=row.breakeven_move_cost_usd_per_1000,
+                breakeven_move_cost_usd=(row.breakeven_move_cost_usd_per_1000 * effective_scale),
+                max_deployable_usd_est=max_deploy,
+                confidence_score=row.confidence_score,
+                capacity_flag=capacity_flag,
+            )
+        )
+    return plan_rows
+
+
+def build_moves_day_curve(
+    schedule_rows: list[ScheduleEnhancedRow],
+    move_cost_scenarios: list[float],
+    deploy_scenarios: list[float],
+    max_moves_per_day_scenarios: list[int],
+    min_hold_hours: int,
+    cooldown_hours_between_moves: int,
+    objective: str,
+    schedule_min_max_deployable_usd: float,
+    schedule_absolute_min_max_deployable_usd: float = 0.0,
+    schedule_min_tvl_usd: float = 0.0,
+) -> list[MovesDayCurveRow]:
+    rows: list[MovesDayCurveRow] = []
+    for move_cost in move_cost_scenarios:
+        for deploy_usd in deploy_scenarios:
+            for max_moves in max_moves_per_day_scenarios:
+                selected_plan = select_schedule_plan(
+                    schedule_rows=schedule_rows,
+                    objective=objective,
+                    move_cost_usd_per_move=move_cost,
+                    deploy_usd=deploy_usd,
+                    max_moves_per_day=max_moves,
+                    min_hold_hours=min_hold_hours,
+                    cooldown_hours_between_moves=cooldown_hours_between_moves,
+                    schedule_min_max_deployable_usd=schedule_min_max_deployable_usd,
+                    schedule_absolute_min_max_deployable_usd=schedule_absolute_min_max_deployable_usd,
+                    schedule_min_tvl_usd=schedule_min_tvl_usd,
+                )
+                total_net = sum(row.expected_net_usd for row in selected_plan)
+                total_gross = sum(row.expected_gross_usd for row in selected_plan)
+                total_baseline = sum(row.expected_baseline_usd for row in selected_plan)
+                notes = "ok" if selected_plan else "0 candidates"
+                rows.append(
+                    MovesDayCurveRow(
+                        objective=objective,
+                        move_cost_usd_per_move=move_cost,
+                        deploy_usd=deploy_usd,
+                        max_moves_per_day=max_moves,
+                        min_hold_hours=max(1, min_hold_hours),
+                        cooldown_hours_between_moves=max(0, cooldown_hours_between_moves),
+                        selected_blocks_count=len(selected_plan),
+                        selected_moves_count=len(selected_plan),
+                        total_net_usd=total_net,
+                        total_gross_usd=total_gross,
+                        total_baseline_usd=total_baseline,
+                        notes=notes,
+                    )
+                )
+    rows.sort(
+        key=lambda r: (
+            r.objective,
+            r.move_cost_usd_per_move,
+            r.deploy_usd,
+            r.max_moves_per_day,
+        )
+    )
+    return rows
+
+
+def build_schedule_run_diagnostics(
+    schedule_rows: list[ScheduleEnhancedRow],
+    objective: str,
+    move_cost_scenarios: list[float],
+    deploy_scenarios: list[float],
+    max_moves_per_day_scenarios: list[int],
+    min_hold_hours: int,
+    cooldown_hours_between_moves: int,
+    schedule_min_max_deployable_usd: float,
+    schedule_absolute_min_max_deployable_usd: float,
+    schedule_min_tvl_usd: float,
+    excluded_by_source_health: int,
+) -> list[ScheduleRunDiagnosticsRow]:
+    rows: list[ScheduleRunDiagnosticsRow] = []
+    for move_cost in move_cost_scenarios:
+        for deploy_usd in deploy_scenarios:
+            for max_moves in max_moves_per_day_scenarios:
+                required_capacity = min(max(0.0, deploy_usd), max(0.0, schedule_min_max_deployable_usd))
+                abs_min_deploy = max(0.0, schedule_absolute_min_max_deployable_usd)
+                min_tvl = max(0.0, schedule_min_tvl_usd)
+                hold_floor = max(1, min_hold_hours)
+
+                total = len(schedule_rows)
+                excluded_hold = 0
+                excluded_capacity = 0
+                excluded_abs_capacity = 0
+                excluded_min_tvl = 0
+                excluded_min_incremental = 0
+                excluded_history = 0
+                excluded_invalid_fee = 0
+                passed_filter_rows: list[ScheduleEnhancedRow] = []
+
+                for item in schedule_rows:
+                    if item.block_hours < hold_floor:
+                        excluded_hold += 1
+                        continue
+                    if item.max_deployable_usd_est < required_capacity:
+                        excluded_capacity += 1
+                        continue
+                    if item.max_deployable_usd_est < abs_min_deploy:
+                        excluded_abs_capacity += 1
+                        continue
+                    est_tvl = (
+                        item.max_deployable_usd_est / item.deploy_fraction_cap
+                        if item.deploy_fraction_cap > 0
+                        else 0.0
+                    )
+                    if est_tvl < min_tvl:
+                        excluded_min_tvl += 1
+                        continue
+                    if _objective_incremental_per_1000(item, objective) <= 0:
+                        excluded_min_incremental += 1
+                        continue
+                    if item.history_quality != "ok":
+                        excluded_history += 1
+                        continue
+                    passed_filter_rows.append(item)
+
+                selected = select_schedule_plan(
+                    schedule_rows=schedule_rows,
+                    objective=objective,
+                    move_cost_usd_per_move=move_cost,
+                    deploy_usd=deploy_usd,
+                    max_moves_per_day=max_moves,
+                    min_hold_hours=min_hold_hours,
+                    cooldown_hours_between_moves=cooldown_hours_between_moves,
+                    schedule_min_max_deployable_usd=schedule_min_max_deployable_usd,
+                    schedule_absolute_min_max_deployable_usd=schedule_absolute_min_max_deployable_usd,
+                    schedule_min_tvl_usd=schedule_min_tvl_usd,
+                )
+                candidates_after_filters = len(passed_filter_rows)
+                reason_if_zero = ""
+                if not selected:
+                    if total == 0:
+                        if excluded_by_source_health > 0:
+                            reason_if_zero = "excluded_by_source_health"
+                        else:
+                            reason_if_zero = "no_schedule_rows"
+                    elif candidates_after_filters == 0:
+                        for reason, value in [
+                            ("excluded_by_hold_hours", excluded_hold),
+                            ("excluded_by_capacity", excluded_capacity),
+                            ("excluded_by_abs_capacity_floor", excluded_abs_capacity),
+                            ("excluded_by_min_tvl", excluded_min_tvl),
+                            ("excluded_by_min_incremental", excluded_min_incremental),
+                            ("excluded_by_history_quality", excluded_history),
+                        ]:
+                            if value > 0:
+                                reason_if_zero = reason
+                                break
+                        if not reason_if_zero:
+                            reason_if_zero = "filtered_out"
+                    else:
+                        reason_if_zero = "net_after_move_cost_or_overlap"
+
+                scenario_id = (
+                    f"{objective}|deploy={deploy_usd:.0f}|cost={move_cost:.0f}|moves={max_moves}|hold={hold_floor}"
+                )
+                rows.append(
+                    ScheduleRunDiagnosticsRow(
+                        scenario_id=scenario_id,
+                        objective=objective,
+                        deploy_usd=deploy_usd,
+                        move_cost_usd_per_move=move_cost,
+                        max_moves_per_day=max_moves,
+                        min_hold_hours=hold_floor,
+                        total_schedule_rows=total,
+                        excluded_by_source_health=excluded_by_source_health,
+                        excluded_by_capacity=excluded_capacity,
+                        excluded_by_abs_capacity_floor=excluded_abs_capacity,
+                        excluded_by_min_incremental=excluded_min_incremental,
+                        excluded_by_history_quality=excluded_history,
+                        excluded_by_invalid_fee_tier=excluded_invalid_fee,
+                        excluded_by_min_tvl=excluded_min_tvl,
+                        excluded_by_hold_hours=excluded_hold,
+                        candidates_after_filters=candidates_after_filters,
+                        selected_blocks_count=len(selected),
+                        reason_if_zero=reason_if_zero,
+                    )
+                )
+
+    rows.sort(
+        key=lambda r: (r.objective, r.move_cost_usd_per_move, r.deploy_usd, r.max_moves_per_day)
+    )
+    return rows
 
 
 def write_hourly_csv(path: Path, observations: Iterable[Observation]) -> None:
@@ -3697,6 +5027,642 @@ def write_schedule_csv(path: Path, schedules: Iterable[ScheduleRecommendation]) 
                     f"{schedule.pool_score:.12f}",
                 ]
             )
+
+
+def write_spike_run_stats_csv(path: Path, rows: Iterable[SpikeRunStats]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "source_name",
+                "version",
+                "chain",
+                "pool_id",
+                "pair",
+                "fee_tier",
+                "spike_threshold_usd_per_1000_hr",
+                "nonzero_hours",
+                "observed_hours",
+                "spike_hours",
+                "hit_rate_pct",
+                "history_quality",
+                "runs_total",
+                "run_length_p50",
+                "run_length_p75",
+                "run_length_p90",
+                "avg_usd_per_1000_hr_when_spiking",
+                "p90_usd_per_1000_hr_when_spiking",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.source_name,
+                    row.version,
+                    row.chain,
+                    row.pool_id,
+                    row.pair,
+                    row.fee_tier,
+                    f"{row.spike_threshold_usd_per_1000_hr:.10f}",
+                    row.nonzero_hours,
+                    row.observed_hours,
+                    row.spike_hours,
+                    f"{row.hit_rate_pct:.6f}",
+                    row.history_quality,
+                    row.runs_total,
+                    f"{row.run_length_p50:.6f}",
+                    f"{row.run_length_p75:.6f}",
+                    f"{row.run_length_p90:.6f}",
+                    f"{row.avg_usd_per_1000_hr_when_spiking:.10f}",
+                    f"{row.p90_usd_per_1000_hr_when_spiking:.10f}",
+                ]
+            )
+
+
+def write_schedule_enhanced_csv(path: Path, rows: Iterable[ScheduleEnhancedRow]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "pool_rank",
+                "source_name",
+                "version",
+                "chain",
+                "pool_id",
+                "pair",
+                "fee_tier",
+                "reliability_hit_rate_pct",
+                "reliable_occurrences",
+                "threshold_hourly_yield_pct",
+                "threshold_hourly_usd_per_1000_liquidity",
+                "avg_block_hourly_yield_pct",
+                "p90_block_hourly_yield_pct",
+                "avg_block_hourly_usd_per_1000_liquidity",
+                "p90_block_hourly_usd_per_1000_liquidity",
+                "block_hours",
+                "next_add_cst",
+                "next_remove_cst",
+                "baseline_usd_per_1000_hr",
+                "baseline_p75_usd_per_1000_hr",
+                "gross_block_usd_per_1000",
+                "gross_block_usd_per_1000_p90",
+                "baseline_block_usd_per_1000",
+                "baseline_block_p75_usd_per_1000",
+                "incremental_usd_per_1000",
+                "incremental_vs_baseline_p75_usd_per_1000",
+                "incremental_range_usd_per_1000",
+                "breakeven_move_cost_usd_per_1000",
+                "risk_adjusted_incremental_usd_per_1000",
+                "tvl_median_usd_est",
+                "max_deployable_usd_est",
+                "deploy_fraction_cap",
+                "capacity_flag",
+                "run_length_p50",
+                "run_length_p90",
+                "hit_rate_pct",
+                "history_quality",
+                "nonzero_hours",
+                "confidence_score",
+                "pool_score",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.pool_rank,
+                    row.source_name,
+                    row.version,
+                    row.chain,
+                    row.pool_id,
+                    row.pair,
+                    row.fee_tier,
+                    f"{row.reliability_hit_rate_pct:.6f}",
+                    row.reliable_occurrences,
+                    f"{row.threshold_hourly_yield_pct:.6f}",
+                    f"{row.threshold_hourly_usd_per_1000_liquidity:.6f}",
+                    f"{row.avg_block_hourly_yield_pct:.6f}",
+                    f"{row.p90_block_hourly_yield_pct:.6f}",
+                    f"{row.avg_block_hourly_usd_per_1000_liquidity:.6f}",
+                    f"{row.p90_block_hourly_usd_per_1000_liquidity:.6f}",
+                    row.block_hours,
+                    format_ts_cst(row.next_add_ts),
+                    format_ts_cst(row.next_remove_ts),
+                    f"{row.baseline_usd_per_1000_hr:.6f}",
+                    f"{row.baseline_p75_usd_per_1000_hr:.6f}",
+                    f"{row.gross_block_usd_per_1000:.6f}",
+                    f"{row.gross_block_usd_per_1000_p90:.6f}",
+                    f"{row.baseline_block_usd_per_1000:.6f}",
+                    f"{row.baseline_block_p75_usd_per_1000:.6f}",
+                    f"{row.incremental_usd_per_1000:.6f}",
+                    f"{row.incremental_vs_baseline_p75_usd_per_1000:.6f}",
+                    row.incremental_range_usd_per_1000,
+                    f"{row.breakeven_move_cost_usd_per_1000:.6f}",
+                    f"{row.risk_adjusted_incremental_usd_per_1000:.6f}",
+                    f"{row.tvl_median_usd_est:.6f}",
+                    f"{row.max_deployable_usd_est:.6f}",
+                    f"{row.deploy_fraction_cap:.6f}",
+                    row.capacity_flag,
+                    f"{row.run_length_p50:.6f}",
+                    f"{row.run_length_p90:.6f}",
+                    f"{row.hit_rate_pct:.6f}",
+                    row.history_quality,
+                    row.nonzero_hours,
+                    f"{row.confidence_score:.6f}",
+                    f"{row.pool_score:.12f}",
+                ]
+            )
+
+
+def write_moves_day_curve_csv(path: Path, rows: Iterable[MovesDayCurveRow]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "objective",
+                "move_cost_usd_per_move",
+                "deploy_usd",
+                "max_moves_per_day",
+                "min_hold_hours",
+                "cooldown_hours_between_moves",
+                "selected_blocks_count",
+                "selected_moves_count",
+                "total_net_usd",
+                "total_gross_usd",
+                "total_baseline_usd",
+                "notes",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.objective,
+                    f"{row.move_cost_usd_per_move:.6f}",
+                    f"{row.deploy_usd:.2f}",
+                    row.max_moves_per_day,
+                    row.min_hold_hours,
+                    row.cooldown_hours_between_moves,
+                    row.selected_blocks_count,
+                    row.selected_moves_count,
+                    f"{row.total_net_usd:.6f}",
+                    f"{row.total_gross_usd:.6f}",
+                    f"{row.total_baseline_usd:.6f}",
+                    row.notes,
+                ]
+            )
+
+
+def write_schedule_run_diagnostics_csv(path: Path, rows: Iterable[ScheduleRunDiagnosticsRow]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "scenario_id",
+                "objective",
+                "deploy_usd",
+                "move_cost_usd_per_move",
+                "max_moves_per_day",
+                "min_hold_hours",
+                "total_schedule_rows",
+                "excluded_by_source_health",
+                "excluded_by_capacity",
+                "excluded_by_abs_capacity_floor",
+                "excluded_by_min_incremental",
+                "excluded_by_history_quality",
+                "excluded_by_invalid_fee_tier",
+                "excluded_by_min_tvl",
+                "excluded_by_hold_hours",
+                "candidates_after_filters",
+                "selected_blocks_count",
+                "reason_if_zero",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.scenario_id,
+                    row.objective,
+                    f"{row.deploy_usd:.2f}",
+                    f"{row.move_cost_usd_per_move:.6f}",
+                    row.max_moves_per_day,
+                    row.min_hold_hours,
+                    row.total_schedule_rows,
+                    row.excluded_by_source_health,
+                    row.excluded_by_capacity,
+                    row.excluded_by_abs_capacity_floor,
+                    row.excluded_by_min_incremental,
+                    row.excluded_by_history_quality,
+                    row.excluded_by_invalid_fee_tier,
+                    row.excluded_by_min_tvl,
+                    row.excluded_by_hold_hours,
+                    row.candidates_after_filters,
+                    row.selected_blocks_count,
+                    row.reason_if_zero,
+                ]
+            )
+
+
+def summarize_schedule_enhanced(rows: list[ScheduleEnhancedRow]) -> ScheduleSummaryStats:
+    if not rows:
+        return ScheduleSummaryStats(
+            blocks_count=0,
+            breakeven_min=0.0,
+            breakeven_p25=0.0,
+            breakeven_p50=0.0,
+            breakeven_p75=0.0,
+            breakeven_p90=0.0,
+            breakeven_max=0.0,
+            incremental_min=0.0,
+            incremental_p25=0.0,
+            incremental_p50=0.0,
+            incremental_p75=0.0,
+            incremental_p90=0.0,
+            incremental_max=0.0,
+            confidence_p50=0.0,
+            confidence_p75=0.0,
+            confidence_p90=0.0,
+            history_ok_count=0,
+            history_insufficient_count=0,
+            history_ok_median_breakeven=0.0,
+            history_insufficient_median_breakeven=0.0,
+        )
+    breakeven_values = [r.breakeven_move_cost_usd_per_1000 for r in rows]
+    incremental_values = [r.incremental_usd_per_1000 for r in rows]
+    confidence_values = [r.confidence_score for r in rows]
+    ok_rows = [r for r in rows if r.history_quality == "ok"]
+    insuf_rows = [r for r in rows if r.history_quality != "ok"]
+    return ScheduleSummaryStats(
+        blocks_count=len(rows),
+        breakeven_min=min(breakeven_values),
+        breakeven_p25=percentile(breakeven_values, 0.25),
+        breakeven_p50=percentile(breakeven_values, 0.50),
+        breakeven_p75=percentile(breakeven_values, 0.75),
+        breakeven_p90=percentile(breakeven_values, 0.90),
+        breakeven_max=max(breakeven_values),
+        incremental_min=min(incremental_values),
+        incremental_p25=percentile(incremental_values, 0.25),
+        incremental_p50=percentile(incremental_values, 0.50),
+        incremental_p75=percentile(incremental_values, 0.75),
+        incremental_p90=percentile(incremental_values, 0.90),
+        incremental_max=max(incremental_values),
+        confidence_p50=percentile(confidence_values, 0.50),
+        confidence_p75=percentile(confidence_values, 0.75),
+        confidence_p90=percentile(confidence_values, 0.90),
+        history_ok_count=len(ok_rows),
+        history_insufficient_count=len(insuf_rows),
+        history_ok_median_breakeven=statistics.median(
+            [r.breakeven_move_cost_usd_per_1000 for r in ok_rows]
+        ) if ok_rows else 0.0,
+        history_insufficient_median_breakeven=statistics.median(
+            [r.breakeven_move_cost_usd_per_1000 for r in insuf_rows]
+        ) if insuf_rows else 0.0,
+    )
+
+
+def resolve_schedule_min_max_deployable_usd(
+    rows: list[ScheduleEnhancedRow],
+    mode: str,
+    fixed_value: float,
+) -> float:
+    fixed = max(0.0, float(fixed_value))
+    if mode == "fixed" or not rows:
+        return fixed
+    values = [max(0.0, r.max_deployable_usd_est) for r in rows if r.max_deployable_usd_est > 0]
+    if not values:
+        return fixed
+    auto_floor = 100.0
+    if mode == "auto_p75":
+        auto_value = percentile(values, 0.75)
+    else:
+        auto_value = percentile(values, 0.50)
+    resolved = max(auto_floor, auto_value)
+    if fixed > 0:
+        resolved = min(resolved, fixed)
+    return resolved
+
+
+def write_schedule_summary_stats_csv(path: Path, stats: ScheduleSummaryStats) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["metric", "value"])
+        writer.writerow(["blocks_count", stats.blocks_count])
+        writer.writerow(["breakeven_min", f"{stats.breakeven_min:.6f}"])
+        writer.writerow(["breakeven_p25", f"{stats.breakeven_p25:.6f}"])
+        writer.writerow(["breakeven_p50", f"{stats.breakeven_p50:.6f}"])
+        writer.writerow(["breakeven_p75", f"{stats.breakeven_p75:.6f}"])
+        writer.writerow(["breakeven_p90", f"{stats.breakeven_p90:.6f}"])
+        writer.writerow(["breakeven_max", f"{stats.breakeven_max:.6f}"])
+        writer.writerow(["incremental_min", f"{stats.incremental_min:.6f}"])
+        writer.writerow(["incremental_p25", f"{stats.incremental_p25:.6f}"])
+        writer.writerow(["incremental_p50", f"{stats.incremental_p50:.6f}"])
+        writer.writerow(["incremental_p75", f"{stats.incremental_p75:.6f}"])
+        writer.writerow(["incremental_p90", f"{stats.incremental_p90:.6f}"])
+        writer.writerow(["incremental_max", f"{stats.incremental_max:.6f}"])
+        writer.writerow(["confidence_p50", f"{stats.confidence_p50:.6f}"])
+        writer.writerow(["confidence_p75", f"{stats.confidence_p75:.6f}"])
+        writer.writerow(["confidence_p90", f"{stats.confidence_p90:.6f}"])
+        writer.writerow(["history_ok_count", stats.history_ok_count])
+        writer.writerow(["history_insufficient_count", stats.history_insufficient_count])
+        writer.writerow(["history_ok_median_breakeven", f"{stats.history_ok_median_breakeven:.6f}"])
+        writer.writerow(["history_insufficient_median_breakeven", f"{stats.history_insufficient_median_breakeven:.6f}"])
+
+
+def write_selected_plan_csv(path: Path, rows: list[SelectedPlanRow]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "objective",
+                "move_cost_usd_per_move",
+                "deploy_usd",
+                "pool_rank",
+                "source_name",
+                "version",
+                "chain",
+                "pool_id",
+                "pair",
+                "next_add_cst",
+                "next_remove_cst",
+                "block_hours",
+                "effective_deploy_usd",
+                "expected_net_usd",
+                "expected_net_usd_per_1000",
+                "expected_gross_usd",
+                "expected_baseline_usd",
+                "breakeven_move_cost_usd_per_1000",
+                "breakeven_move_cost_usd",
+                "max_deployable_usd_est",
+                "confidence_score",
+                "capacity_flag",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.objective,
+                    f"{row.move_cost_usd_per_move:.6f}",
+                    f"{row.deploy_usd:.2f}",
+                    row.pool_rank,
+                    row.source_name,
+                    row.version,
+                    row.chain,
+                    row.pool_id,
+                    row.pair,
+                    format_ts_cst(row.next_add_ts),
+                    format_ts_cst(row.next_remove_ts),
+                    row.block_hours,
+                    f"{row.effective_deploy_usd:.2f}",
+                    f"{row.expected_net_usd:.6f}",
+                    f"{row.expected_net_usd_per_1000:.6f}",
+                    f"{row.expected_gross_usd:.6f}",
+                    f"{row.expected_baseline_usd:.6f}",
+                    f"{row.breakeven_move_cost_usd_per_1000:.6f}",
+                    f"{row.breakeven_move_cost_usd:.6f}",
+                    f"{row.max_deployable_usd_est:.2f}",
+                    f"{row.confidence_score:.6f}",
+                    row.capacity_flag,
+                ]
+            )
+
+
+def write_dashboard_state_json(
+    path: Path,
+    generated_ts: int,
+    llama_diagnostics: LlamaRunDiagnostics | None,
+    llama_thresholds: LlamaAdaptiveThresholds | None,
+    llama_rows: list[LlamaSpikeRankingRow],
+    schedule_rows: list[ScheduleEnhancedRow],
+    selected_plan_rows: list[SelectedPlanRow],
+    source_health_rows: list[SourceHealthRow],
+    moves_day_curve: list[MovesDayCurveRow],
+    schedule_run_diagnostics: list[ScheduleRunDiagnosticsRow],
+    scenario_plan_filename: str,
+    default_move_cost_usd: float,
+    default_deploy_usd: float,
+    default_max_moves_per_day: int,
+    optimizer_objective: str,
+    chart_assets: dict[str, dict[str, str]] | None,
+    selected_plan_context: str = "active",
+    selected_plan_context_scenario: str = "",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    chart_assets = chart_assets or {}
+    chart_by_pool = chart_assets
+
+    def with_chart(pool_id: str) -> dict[str, str | None]:
+        entry = chart_by_pool.get(pool_id, {})
+        return {
+            "timeseries_png": entry.get("timeseries"),
+            "heatmap_png": entry.get("heatmap"),
+        }
+
+    spikes_rows = [
+        {
+            "source_name": row.source_name,
+            "chain": row.chain,
+            "pair": row.pair,
+            "pool_label": human_pool_label(
+                token0_symbol=row.token0_symbol,
+                token1_symbol=row.token1_symbol,
+                token0_address=row.token0,
+                token1_address=row.token1,
+            ),
+            "hour_start_ts": row.hour_start_unix,
+            "hour_start_cst": format_ts_cst(row.hour_start_unix),
+            "usd_per_1000_liquidity_hourly": row.usd_per_1000_liquidity_hourly,
+            "score": row.score,
+            "spike_multiplier": row.spike_multiplier,
+            "persistence_hits": row.persistence_hits,
+            "flags": row.notes_flags,
+            "charts": with_chart(row.pair),
+        }
+        for row in llama_rows[:100]
+    ]
+    schedule_top_blocks = [
+        {
+            "pool_rank": row.pool_rank,
+            "source_name": row.source_name,
+            "chain": row.chain,
+            "pool_id": row.pool_id,
+            "pair": row.pair,
+            "next_add_cst": format_ts_cst(row.next_add_ts),
+            "next_remove_cst": format_ts_cst(row.next_remove_ts),
+            "incremental_usd_per_1000": row.incremental_usd_per_1000,
+            "risk_adjusted_incremental_usd_per_1000": row.risk_adjusted_incremental_usd_per_1000,
+            "breakeven_move_cost_usd_per_1000": row.breakeven_move_cost_usd_per_1000,
+            "max_deployable_usd_est": row.max_deployable_usd_est,
+            "capacity_flag": row.capacity_flag,
+            "confidence_score": row.confidence_score,
+            "charts": with_chart(row.pool_id),
+        }
+        for row in schedule_rows[:200]
+    ]
+    selected_plan_state = [
+        {
+            "pool_rank": row.pool_rank,
+            "source_name": row.source_name,
+            "chain": row.chain,
+            "pool_id": row.pool_id,
+            "pair": row.pair,
+            "next_add_cst": format_ts_cst(row.next_add_ts),
+            "next_remove_cst": format_ts_cst(row.next_remove_ts),
+            "effective_deploy_usd": row.effective_deploy_usd,
+            "expected_net_usd": row.expected_net_usd,
+            "expected_net_usd_per_1000": row.expected_net_usd_per_1000,
+            "capacity_flag": row.capacity_flag,
+            "confidence_score": row.confidence_score,
+            "charts": with_chart(row.pool_id),
+        }
+        for row in selected_plan_rows
+    ]
+    curve_rows = [
+        {
+            "objective": row.objective,
+            "move_cost_usd_per_move": row.move_cost_usd_per_move,
+            "deploy_usd": row.deploy_usd,
+            "max_moves_per_day": row.max_moves_per_day,
+            "selected_blocks_count": row.selected_blocks_count,
+            "selected_moves_count": row.selected_moves_count,
+            "total_net_usd": row.total_net_usd,
+            "notes": row.notes,
+        }
+        for row in moves_day_curve
+    ]
+    active_diag = next(
+        (
+            {
+                "scenario_id": row.scenario_id,
+                "objective": row.objective,
+                "deploy_usd": row.deploy_usd,
+                "move_cost_usd_per_move": row.move_cost_usd_per_move,
+                "max_moves_per_day": row.max_moves_per_day,
+                "min_hold_hours": row.min_hold_hours,
+                "total_schedule_rows": row.total_schedule_rows,
+                "excluded_by_source_health": row.excluded_by_source_health,
+                "excluded_by_capacity": row.excluded_by_capacity,
+                "excluded_by_abs_capacity_floor": row.excluded_by_abs_capacity_floor,
+                "excluded_by_min_incremental": row.excluded_by_min_incremental,
+                "excluded_by_history_quality": row.excluded_by_history_quality,
+                "excluded_by_invalid_fee_tier": row.excluded_by_invalid_fee_tier,
+                "excluded_by_min_tvl": row.excluded_by_min_tvl,
+                "excluded_by_hold_hours": row.excluded_by_hold_hours,
+                "candidates_after_filters": row.candidates_after_filters,
+                "selected_blocks_count": row.selected_blocks_count,
+                "reason_if_zero": row.reason_if_zero,
+            }
+            for row in schedule_run_diagnostics
+            if row.objective == optimizer_objective
+            and abs(row.deploy_usd - default_deploy_usd) < 1e-9
+            and abs(row.move_cost_usd_per_move - default_move_cost_usd) < 1e-9
+            and row.max_moves_per_day == default_max_moves_per_day
+        ),
+        None,
+    )
+    state = {
+        "generated_utc": iso_hour(generated_ts),
+        "defaults": {
+            "objective": optimizer_objective,
+            "move_cost_usd": default_move_cost_usd,
+            "deploy_usd": default_deploy_usd,
+            "max_moves_per_day": default_max_moves_per_day,
+            "scenario_plan_filename": scenario_plan_filename,
+            "selected_plan_context": selected_plan_context,
+            "selected_plan_context_scenario": selected_plan_context_scenario,
+        },
+        "llama": {
+            "endpoint": (llama_diagnostics.endpoint if llama_diagnostics is not None else ""),
+            "meta_block_number": (llama_diagnostics.meta_block_number if llama_diagnostics is not None else None),
+            "seed_next_index": (llama_diagnostics.seed_next_index if llama_diagnostics is not None else None),
+            "seed_total": (llama_diagnostics.seed_total if llama_diagnostics is not None else None),
+            "seed_last_block": (llama_diagnostics.seed_last_block if llama_diagnostics is not None else None),
+            "window_start_ts": (llama_diagnostics.window_start_ts if llama_diagnostics is not None else None),
+            "window_end_ts": (llama_diagnostics.window_end_ts if llama_diagnostics is not None else None),
+            "thresholds": (
+                {
+                    "band": llama_thresholds.band,
+                    "min_swap_count": llama_thresholds.min_swap_count,
+                    "min_weth_liquidity": llama_thresholds.min_weth_liquidity,
+                    "baseline_hours": llama_thresholds.baseline_hours,
+                    "persistence_hours": llama_thresholds.persistence_hours,
+                    "persistence_spike_multiplier": llama_thresholds.persistence_spike_multiplier,
+                    "persistence_min_hits": llama_thresholds.persistence_min_hits,
+                    "fallback_trace": llama_thresholds.fallback_trace,
+                    "total_rows": llama_thresholds.total_rows,
+                }
+                if llama_thresholds is not None
+                else None
+            ),
+            "dropoff": (
+                {
+                    "fetched_raw_rows": llama_diagnostics.counts.fetched_raw_rows,
+                    "after_time_window_filter": llama_diagnostics.counts.after_time_window_filter,
+                    "after_min_swaps_filter": llama_diagnostics.counts.after_min_swaps_filter,
+                    "after_min_weth_filter": llama_diagnostics.counts.after_min_weth_filter,
+                    "after_baseline_ready_filter": llama_diagnostics.counts.after_baseline_ready_filter,
+                    "after_spike_multiplier_filter": llama_diagnostics.counts.after_spike_multiplier_filter,
+                    "after_persistence_filter": llama_diagnostics.counts.after_persistence_filter,
+                    "final_ranked_rows": llama_diagnostics.counts.final_ranked_rows,
+                }
+                if llama_diagnostics is not None
+                else None
+            ),
+            "top_spikes": spikes_rows,
+        },
+        "spikes": spikes_rows,
+        "schedule": {
+            "top_blocks": schedule_top_blocks,
+            "selected_plan": selected_plan_state,
+            "curve": curve_rows,
+            "moves_day_curve": curve_rows,
+            "diagnostics": {
+                "active_scenario": active_diag,
+                "all": [
+                    {
+                        "scenario_id": row.scenario_id,
+                        "objective": row.objective,
+                        "deploy_usd": row.deploy_usd,
+                        "move_cost_usd_per_move": row.move_cost_usd_per_move,
+                        "max_moves_per_day": row.max_moves_per_day,
+                        "min_hold_hours": row.min_hold_hours,
+                        "total_schedule_rows": row.total_schedule_rows,
+                        "excluded_by_source_health": row.excluded_by_source_health,
+                        "excluded_by_capacity": row.excluded_by_capacity,
+                        "excluded_by_abs_capacity_floor": row.excluded_by_abs_capacity_floor,
+                        "excluded_by_min_incremental": row.excluded_by_min_incremental,
+                        "excluded_by_history_quality": row.excluded_by_history_quality,
+                        "excluded_by_invalid_fee_tier": row.excluded_by_invalid_fee_tier,
+                        "excluded_by_min_tvl": row.excluded_by_min_tvl,
+                        "excluded_by_hold_hours": row.excluded_by_hold_hours,
+                        "candidates_after_filters": row.candidates_after_filters,
+                        "selected_blocks_count": row.selected_blocks_count,
+                        "reason_if_zero": row.reason_if_zero,
+                    }
+                    for row in schedule_run_diagnostics
+                ],
+            },
+        },
+        "source_health": [
+            {
+                "source_name": row.source_name,
+                "version": row.version,
+                "chain": row.chain,
+                "input_rows": row.input_rows,
+                "fees_with_nonpositive_tvl_rate": row.fees_with_nonpositive_tvl_rate,
+                "tvl_below_floor_rate": row.tvl_below_floor_rate,
+                "invalid_fee_tier_rate": row.invalid_fee_tier_rate,
+                "excluded_from_schedule": row.excluded_from_schedule,
+                "exclusion_reason": row.exclusion_reason,
+            }
+            for row in source_health_rows
+        ],
+        "charts": chart_assets,
+    }
+    path.write_text(json.dumps(state, indent=2, sort_keys=False), encoding="utf-8")
 
 
 def write_schedule_md(
@@ -4048,6 +6014,10 @@ def write_report_html(
     path: Path,
     rankings: list[PoolRanking],
     schedules: list[ScheduleRecommendation],
+    schedule_enhanced: list[ScheduleEnhancedRow] | None,
+    spike_run_stats: list[SpikeRunStats] | None,
+    moves_day_curve: list[MovesDayCurveRow] | None,
+    schedule_run_diagnostics: list[ScheduleRunDiagnosticsRow] | None,
     v2_spike_rows: list[V2YieldSpikeRow],
     llama_rows: list[LlamaSpikeRankingRow],
     llama_thresholds: LlamaAdaptiveThresholds | None,
@@ -4064,10 +6034,30 @@ def write_report_html(
     quality_input_rows: int,
     quality_output_rows: int,
     quality_rejected_rows: int,
+    run_stats_threshold_zero_pct: float = 0.0,
+    run_stats_always_spike_zero_avg_pct: float = 0.0,
+    require_run_history_quality_ok: bool = False,
+    optimizer_objective: str = "risk_adjusted",
+    default_deploy_usd: float = 10000.0,
+    default_move_cost_usd: float = 50.0,
+    default_max_moves_per_day: int = 4,
+    schedule_summary_stats: ScheduleSummaryStats | None = None,
+    selected_plan_rows: list[SelectedPlanRow] | None = None,
+    source_health_rows: list[SourceHealthRow] | None = None,
+    chart_assets: dict[str, dict[str, str]] | None = None,
+    scenario_plan_filename: str = "selected_plan_default.csv",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    schedule_enhanced = schedule_enhanced or []
+    spike_run_stats = spike_run_stats or []
+    moves_day_curve = moves_day_curve or []
+    schedule_run_diagnostics = schedule_run_diagnostics or []
+    selected_plan_rows = selected_plan_rows or []
+    source_health_rows = source_health_rows or []
+    chart_assets = chart_assets or {}
     top_rankings = rankings[:top_n]
     top_schedules = schedules[:top_n]
+    top_schedule_enhanced = schedule_enhanced[:top_n]
     now_ts = int(time.time())
     generated_ts = format_ts_cst(now_ts)
     jump_now_rows = select_jump_now_schedules(
@@ -4089,12 +6079,21 @@ def write_report_html(
     ranking_rows = []
     for idx, row in enumerate(top_rankings, start=1):
         exchange = infer_exchange_name(row.source_name)
+        metadata_quality = metadata_quality_from_pair_label(row.pair)
+        explorer_url = pool_explorer_url(row.chain, row.pool_id)
+        pool_display = html.escape(row.pair)
+        if explorer_url:
+            pool_display = (
+                f"<a href=\"{html.escape(explorer_url)}\" target=\"_blank\" rel=\"noopener\">"
+                f"{pool_display}</a>"
+            )
         ranking_rows.append(
             "<tr>"
             f"<td>{idx}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.avg_hourly_yield_pct):.6f}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
+            f"<td>{pool_display}</td>"
             f"<td>{html.escape(exchange)}</td>"
+            f"<td>{metadata_quality}</td>"
             f"<td>{html.escape(row.version)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
@@ -4122,12 +6121,21 @@ def write_report_html(
     schedule_rows = []
     for row in top_schedules:
         exchange = infer_exchange_name(row.source_name)
+        metadata_quality = metadata_quality_from_pair_label(row.pair)
+        explorer_url = pool_explorer_url(row.chain, row.pool_id)
+        pool_display = html.escape(row.pair)
+        if explorer_url:
+            pool_display = (
+                f"<a href=\"{html.escape(explorer_url)}\" target=\"_blank\" rel=\"noopener\">"
+                f"{pool_display}</a>"
+            )
         schedule_rows.append(
             "<tr>"
             f"<td>{row.pool_rank}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.avg_block_hourly_yield_pct):.6f}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
+            f"<td>{pool_display}</td>"
             f"<td>{html.escape(exchange)}</td>"
+            f"<td>{metadata_quality}</td>"
             f"<td>{html.escape(row.version)}</td>"
             f"<td>{html.escape(format_pattern_cst(row.next_add_ts))}</td>"
             f"<td>{html.escape(format_pattern_cst(row.next_remove_ts))}</td>"
@@ -4142,12 +6150,21 @@ def write_report_html(
     jump_rows = []
     for row, status, eta_seconds in jump_now_rows:
         exchange = infer_exchange_name(row.source_name)
+        metadata_quality = metadata_quality_from_pair_label(row.pair)
+        explorer_url = pool_explorer_url(row.chain, row.pool_id)
+        pool_display = html.escape(row.pair)
+        if explorer_url:
+            pool_display = (
+                f"<a href=\"{html.escape(explorer_url)}\" target=\"_blank\" rel=\"noopener\">"
+                f"{pool_display}</a>"
+            )
         jump_rows.append(
             "<tr>"
             f"<td>{row.pool_rank}</td>"
             f"<td>{usd_per_1000_from_yield_pct(row.avg_block_hourly_yield_pct):.6f}</td>"
-            f"<td>{html.escape(row.pair)}</td>"
+            f"<td>{pool_display}</td>"
             f"<td>{html.escape(exchange)}</td>"
+            f"<td>{metadata_quality}</td>"
             f"<td>{html.escape(row.version)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
             f"<td>{html.escape(status)}</td>"
@@ -4160,13 +6177,149 @@ def write_report_html(
         )
 
     rankings_table_html = "\n".join(ranking_rows) if ranking_rows else (
-        "<tr><td colspan='25'>No ranked pools found.</td></tr>"
+        "<tr><td colspan='26'>No ranked pools found.</td></tr>"
     )
     schedules_table_html = "\n".join(schedule_rows) if schedule_rows else (
-        "<tr><td colspan='12'>No reliable recurring schedule blocks found.</td></tr>"
+        "<tr><td colspan='13'>No reliable recurring schedule blocks found.</td></tr>"
     )
+    break_even_rows: list[str] = []
+    for row in top_schedule_enhanced:
+        exchange = infer_exchange_name(row.source_name)
+        metadata_quality = metadata_quality_from_pair_label(row.pair)
+        explorer_url = pool_explorer_url(row.chain, row.pool_id)
+        pool_display = html.escape(row.pair)
+        if explorer_url:
+            pool_display = (
+                f"<a href=\"{html.escape(explorer_url)}\" target=\"_blank\" rel=\"noopener\">"
+                f"{pool_display}</a>"
+            )
+        break_even_rows.append(
+            "<tr>"
+            f"<td>{row.pool_rank}</td>"
+            f"<td>{row.avg_block_hourly_usd_per_1000_liquidity:.6f}</td>"
+            f"<td>{pool_display}</td>"
+            f"<td>{html.escape(exchange)}</td>"
+            f"<td>{metadata_quality}</td>"
+            f"<td>{html.escape(row.chain)}</td>"
+            f"<td>{row.block_hours}</td>"
+            f"<td>{row.gross_block_usd_per_1000:.6f}</td>"
+            f"<td>{row.baseline_block_usd_per_1000:.6f}</td>"
+            f"<td>{row.incremental_usd_per_1000:.6f}</td>"
+            f"<td>{row.breakeven_move_cost_usd_per_1000:.6f}</td>"
+            f"<td>{row.run_length_p50:.2f}</td>"
+            f"<td>{row.run_length_p90:.2f}</td>"
+            f"<td>{row.hit_rate_pct:.2f}</td>"
+            f"<td>{row.confidence_score:.4f}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_add_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_remove_ts))}</td>"
+            "</tr>"
+        )
+    break_even_table_html = "\n".join(break_even_rows) if break_even_rows else (
+        "<tr><td colspan='17'>No enhanced schedule rows available.</td></tr>"
+    )
+    run_stats_warning = ""
+    if run_stats_threshold_zero_pct > 2.0 or run_stats_always_spike_zero_avg_pct > 2.0:
+        run_stats_warning = (
+            "<p class='note'><strong>Warning:</strong> Spike run-stats sanity checks are high. "
+            "Investigate thresholding/history filters before trusting confidence-driven scheduling.</p>"
+        )
+
+    frontier_rows: list[str] = []
+    default_deploy = default_deploy_usd
+    frontier_subset = [
+        row
+        for row in moves_day_curve
+        if abs(row.deploy_usd - default_deploy) < 0.001 and row.objective == optimizer_objective
+    ]
+    for row in frontier_subset:
+        frontier_rows.append(
+            "<tr>"
+            f"<td>{row.move_cost_usd_per_move:.2f}</td>"
+            f"<td>{row.deploy_usd:.0f}</td>"
+            f"<td>{row.max_moves_per_day}</td>"
+            f"<td>{row.selected_blocks_count}</td>"
+            f"<td>{row.selected_moves_count}</td>"
+            f"<td>{row.total_net_usd:.2f}</td>"
+            f"<td>{row.total_gross_usd:.2f}</td>"
+            f"<td>{row.total_baseline_usd:.2f}</td>"
+            f"<td>{html.escape(row.notes)}</td>"
+            "</tr>"
+        )
+    frontier_table_html = "\n".join(frontier_rows) if frontier_rows else (
+        "<tr><td colspan='9'>No frontier rows generated.</td></tr>"
+    )
+    frontier_by_cost_moves: dict[float, dict[int, float]] = defaultdict(dict)
+    for row in frontier_subset:
+        frontier_by_cost_moves[row.move_cost_usd_per_move][row.max_moves_per_day] = row.total_net_usd
+    frontier_matrix_rows: list[str] = []
+    for cost in sorted(frontier_by_cost_moves):
+        vals = frontier_by_cost_moves[cost]
+        frontier_matrix_rows.append(
+            "<tr>"
+            f"<td>{cost:.2f}</td>"
+            f"<td>{vals.get(1, 0.0):.2f}</td>"
+            f"<td>{vals.get(2, 0.0):.2f}</td>"
+            f"<td>{vals.get(4, 0.0):.2f}</td>"
+            f"<td>{vals.get(8, 0.0):.2f}</td>"
+            "</tr>"
+        )
+    frontier_matrix_html = "\n".join(frontier_matrix_rows) if frontier_matrix_rows else (
+        "<tr><td colspan='5'>No frontier matrix rows available.</td></tr>"
+    )
+    active_schedule_diag = next(
+        (
+            row
+            for row in schedule_run_diagnostics
+            if row.objective == optimizer_objective
+            and abs(row.deploy_usd - default_deploy_usd) < 1e-9
+            and abs(row.move_cost_usd_per_move - default_move_cost_usd) < 1e-9
+            and row.max_moves_per_day == default_max_moves_per_day
+        ),
+        None,
+    )
+    schedule_diag_note = ""
+    if active_schedule_diag is not None:
+        schedule_diag_note = (
+            "Schedule diagnostics: "
+            f"total={active_schedule_diag.total_schedule_rows}, "
+            f"src_health={active_schedule_diag.excluded_by_source_health}, "
+            f"capacity={active_schedule_diag.excluded_by_capacity}, "
+            f"abs_capacity={active_schedule_diag.excluded_by_abs_capacity_floor}, "
+            f"min_tvl={active_schedule_diag.excluded_by_min_tvl}, "
+            f"hold={active_schedule_diag.excluded_by_hold_hours}, "
+            f"candidates={active_schedule_diag.candidates_after_filters}, "
+            f"selected={active_schedule_diag.selected_blocks_count}, "
+            f"reason_if_zero={active_schedule_diag.reason_if_zero or 'n/a'}."
+        )
+    plan_rows_html: list[str] = []
+    for row in selected_plan_rows[:3]:
+        plan_rows_html.append(
+            "<tr>"
+            f"<td>{html.escape(row.pair)}</td>"
+            f"<td>{html.escape(row.chain)}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_add_ts))}</td>"
+            f"<td>{html.escape(format_ts_cst(row.next_remove_ts))}</td>"
+            f"<td>{row.max_deployable_usd_est:.2f}</td>"
+            f"<td>{row.effective_deploy_usd:.2f}</td>"
+            f"<td>{row.expected_net_usd_per_1000:.4f}</td>"
+            f"<td>{row.breakeven_move_cost_usd:.2f}</td>"
+            f"<td>{row.confidence_score:.4f}</td>"
+            f"<td>{html.escape(row.capacity_flag)}</td>"
+            "</tr>"
+        )
+    today_plan_table_html = "\n".join(plan_rows_html) if plan_rows_html else (
+        "<tr><td colspan='10'>No qualifying moves for current objective/cost scenario.</td></tr>"
+    )
+    summary_note = ""
+    if schedule_summary_stats is not None:
+        summary_note = (
+            f"Most blocks break even below ${schedule_summary_stats.breakeven_p50:.2f} per $1k; "
+            f"top quartile exceed ${schedule_summary_stats.breakeven_p75:.2f} per $1k. "
+            f"Confidence p50/p75/p90 = {schedule_summary_stats.confidence_p50:.3f}/"
+            f"{schedule_summary_stats.confidence_p75:.3f}/{schedule_summary_stats.confidence_p90:.3f}."
+        )
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
-        "<tr><td colspan='12'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
+        "<tr><td colspan='13'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
     top_llama_rows = llama_rows[: max(0, v2_spike_top)]
     llama_rows_html = []
@@ -4178,12 +6331,26 @@ def write_report_html(
             token0_address=row.token0,
             token1_address=row.token1,
         )
+        metadata_quality = metadata_quality_from_token_symbols(
+            token0_symbol=row.token0_symbol,
+            token1_symbol=row.token1_symbol,
+            token0_address=row.token0,
+            token1_address=row.token1,
+        )
+        explorer_url = pool_explorer_url(row.chain, row.pair)
+        pool_display = html.escape(pool_name)
+        if explorer_url:
+            pool_display = (
+                f"<a href=\"{html.escape(explorer_url)}\" target=\"_blank\" rel=\"noopener\">"
+                f"{pool_display}</a>"
+            )
         llama_rows_html.append(
             "<tr>"
             f"<td>{idx}</td>"
             f"<td>{row.usd_per_1000_liquidity_hourly:.6f}</td>"
-            f"<td>{html.escape(pool_name)}</td>"
+            f"<td>{pool_display}</td>"
             f"<td>{html.escape(exchange)}</td>"
+            f"<td>{metadata_quality}</td>"
             f"<td>{html.escape(row.source_name)}</td>"
             f"<td>{html.escape(row.chain)}</td>"
             f"<td>{html.escape(row.pair)}</td>"
@@ -4213,7 +6380,7 @@ def write_report_html(
             if llama_diagnostics is not None
             else "No V2 fee-yield spike rows matched adaptive threshold and persistence filters."
         )
-        llama_table_html = f"<tr><td colspan='23'>{empty_text}</td></tr>"
+        llama_table_html = f"<tr><td colspan='24'>{empty_text}</td></tr>"
     llama_endpoint_note = "<br/>".join(
         f"{html.escape(src.name)}: <code>{html.escape(src.endpoint)}</code>" for src in llama_sources
     )
@@ -4388,12 +6555,67 @@ def write_report_html(
         <a href="pool_rankings.csv">pool_rankings.csv</a>
         <a href="hourly_observations.csv">hourly_observations.csv</a>
         <a href="liquidity_schedule.csv">liquidity_schedule.csv</a>
+        <a href="schedule_enhanced.csv">schedule_enhanced.csv</a>
+        <a href="spike_run_stats.csv">spike_run_stats.csv</a>
+        <a href="moves_day_curve.csv">moves_day_curve.csv</a>
+        <a href="schedule_run_diagnostics.csv">schedule_run_diagnostics.csv</a>
+        <a href="schedule_summary_stats.csv">schedule_summary_stats.csv</a>
+        <a href="selected_plan_default.csv">selected_plan_default.csv</a>
+        <a href="{html.escape(scenario_plan_filename)}">{html.escape(scenario_plan_filename)}</a>
+        <a href="dashboard_state.json">dashboard_state.json</a>
+        <a href="source_health.csv">source_health.csv</a>
         <a href="sushi_v2_yield_spikes.csv">sushi_v2_yield_spikes.csv</a>
         <a href="llama_pair_hour_data.csv">llama_pair_hour_data.csv</a>
         <a href="llama_weth_spike_rankings.csv">llama_weth_spike_rankings.csv</a>
         <a href="llama_run_diagnostics.csv">llama_run_diagnostics.csv</a>
         <a href="pool_rankings_diagnostics.csv">pool_rankings_diagnostics.csv</a>
         <a href="data_quality_audit.csv">data_quality_audit.csv</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Source Health</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th><th>Version</th><th>Chain</th><th>Input Rows</th><th>fees_with_nonpositive_tvl_rate</th>
+              <th>tvl_below_floor_rate</th><th>invalid_fee_tier_rate</th><th>Excluded</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {"".join([
+              "<tr>"
+              f"<td>{html.escape(r.source_name)}</td><td>{html.escape(r.version)}</td><td>{html.escape(r.chain)}</td>"
+              f"<td>{r.input_rows}</td><td>{r.fees_with_nonpositive_tvl_rate:.4%}</td>"
+              f"<td>{r.tvl_below_floor_rate:.4%}</td><td>{r.invalid_fee_tier_rate:.4%}</td>"
+              f"<td>{'yes' if r.excluded_from_schedule else 'no'}</td><td>{html.escape(r.exclusion_reason)}</td>"
+              "</tr>"
+              for r in source_health_rows
+            ]) if source_health_rows else "<tr><td colspan='9'>No source health rows.</td></tr>"}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Today's Plan</h2>
+      <p class="note">
+        Scenario: objective={html.escape(optimizer_objective)}, deploy=${default_deploy_usd:,.0f}, move cost=${default_move_cost_usd:.2f}/move,
+        max_moves/day={default_max_moves_per_day}. Export file: <code>{html.escape(scenario_plan_filename)}</code>.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Pool</th><th>Chain</th><th>Next Add (CST)</th><th>Next Remove (CST)</th>
+              <th>Max Deployable USD</th><th>Effective Deploy USD</th><th>Expected Net USD/$1k</th><th>Breakeven Move Cost USD</th><th>Confidence</th><th>Capacity Flag</th>
+            </tr>
+          </thead>
+          <tbody>
+            {today_plan_table_html}
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -4406,7 +6628,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Status</th>
+              <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Metadata Quality</th><th>Version</th><th>Chain</th><th>Status</th>
               <th>ETA</th><th>Next Add (CST)</th><th>Next Remove (CST)</th>
               <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th>
             </tr>
@@ -4434,7 +6656,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Source</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
+              <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Metadata Quality</th><th>Source</th><th>Chain</th><th>Pair Address</th><th>Token0</th><th>Token1</th>
               <th>Token0 Symbol</th><th>Token1 Symbol</th>
               <th>Hour (CST)</th><th>Swap Count</th>
               <th>feeWETH (normalized)</th><th>reserveWETH (normalized)</th><th>Score</th><th>Hourly Yield %</th><th>Rough APR %</th>
@@ -4463,7 +6685,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th><th>Chain</th><th>Pair</th><th>Fee Tier</th>
+              <th>Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Metadata Quality</th><th>Version</th><th>Chain</th><th>Pair</th><th>Fee Tier</th>
               <th>Avg TVL USD</th><th>Outlier Hours</th>
               <th>Avg Hourly Fee USD</th><th>Total Fees USD</th><th>Obs Hours</th>
               <th>Fee Period Start (CST)</th><th>Fee Period End (CST)</th>
@@ -4488,7 +6710,7 @@ def write_report_html(
         <table>
           <thead>
             <tr>
-              <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Version</th>
+              <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Metadata Quality</th><th>Version</th>
               <th>Add Pattern (CST)</th><th>Remove Pattern (CST)</th>
               <th>Next Add (CST)</th><th>Next Remove (CST)</th>
               <th>Hit Rate %</th><th>Avg Block Hourly Yield %</th><th>Block Hours</th>
@@ -4496,6 +6718,97 @@ def write_report_html(
           </thead>
           <tbody>
             {schedules_table_html}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Break-even Move Cost Thresholds</h2>
+      <p class="note">
+        Baseline mode: per-chain median USD per $1k/hr over last 30 days using top 200 pools by median TVL.
+        Break-even move cost is the max incremental advantage per $1k for each schedule block.
+        Spike run stats rows available: {len(spike_run_stats)}.
+        History-quality strict filter: {"enabled" if require_run_history_quality_ok else "disabled"}.
+      </p>
+      <p class="note">
+        RunStats sanity: threshold==0: {run_stats_threshold_zero_pct:.2f}%, always-spike-with-zero-avg: {run_stats_always_spike_zero_avg_pct:.2f}%.
+      </p>
+      <p class="note">
+        {html.escape(summary_note)}
+      </p>
+      {run_stats_warning}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Pool Rank</th><th>Avg USD per $1k / hr</th><th>Pool</th><th>Exchange</th><th>Metadata Quality</th><th>Chain</th><th>Block Hours</th>
+              <th>Gross Block USD/$1k</th><th>Baseline Block USD/$1k</th><th>Incremental USD/$1k</th><th>Breakeven Move Cost USD/$1k</th>
+              <th>Run P50 (hrs)</th><th>Run P90 (hrs)</th><th>Hit Rate %</th><th>Confidence</th><th>Next Add (CST)</th><th>Next Remove (CST)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {break_even_table_html}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Moves/Day Frontier</h2>
+      <p class="note">
+        Scenario grid uses move_cost_usd_per_move=[0,25,50,100,250], deploy_usd=[1000,10000], max_moves_per_day=[1,2,4,8], min_hold_hours=1.
+        Table below shows deploy_usd={default_deploy_usd:.0f} under objective={html.escape(optimizer_objective)}; use moves_day_curve.csv for full grid.
+      </p>
+      <p class="note">{html.escape(schedule_diag_note) if schedule_diag_note else "Schedule diagnostics unavailable."}</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Move Cost USD</th><th>Deploy USD</th><th>Max Moves/Day</th><th>Selected Blocks</th><th>Selected Moves</th>
+              <th>Total Net USD</th><th>Total Gross USD</th><th>Total Baseline USD</th><th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {frontier_table_html}
+          </tbody>
+        </table>
+      </div>
+      <div class="table-wrap" style="margin-top:10px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Move Cost USD</th><th>Net @ 1 move/day</th><th>Net @ 2 moves/day</th><th>Net @ 4 moves/day</th><th>Net @ 8 moves/day</th>
+            </tr>
+          </thead>
+          <tbody>
+            {frontier_matrix_html}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Pool Visualizations</h2>
+      <p class="note">
+        Charts show yield trend and hour-of-week heatmap for top schedule pools.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Pool</th><th>Time Series</th><th>Heatmap</th>
+            </tr>
+          </thead>
+          <tbody>
+            {"".join([
+              "<tr>"
+              f"<td>{html.escape(pool_id)}</td>"
+              f"<td><a href='{html.escape(paths.get('timeseries',''))}' target='_blank' rel='noopener'>open</a><br/><img src='{html.escape(paths.get('timeseries',''))}' style='max-width:280px;max-height:100px;'/></td>"
+              f"<td><a href='{html.escape(paths.get('heatmap',''))}' target='_blank' rel='noopener'>open</a><br/><img src='{html.escape(paths.get('heatmap',''))}' style='max-width:280px;max-height:100px;'/></td>"
+              "</tr>"
+              for pool_id, paths in list(chart_assets.items())[:20]
+            ]) if chart_assets else "<tr><td colspan='3'>Charts unavailable.</td></tr>"}
           </tbody>
         </table>
       </div>
@@ -4735,6 +7048,9 @@ def main() -> int:
         return 1
 
     quality_input_rows = len(observations)
+    source_input_counts: dict[tuple[str, str, str], int] = defaultdict(int)
+    for row in observations:
+        source_input_counts[(row.source_name, row.version, row.chain)] += 1
     tvl_alias_sanity_counts = compute_source_tvl_alias_sanity(
         observations=observations,
         v2_spike_sources=v2_spike_sources,
@@ -4769,6 +7085,23 @@ def main() -> int:
                 f"Data quality filters rejected {quality_rejected_rows:,} / {quality_input_rows:,} rows "
                 f"({(100.0 * quality_rejected_rows / quality_input_rows):.2f}%)."
             ),
+            file=sys.stderr,
+        )
+    source_health_rows = compute_source_health_rows(
+        source_input_counts=source_input_counts,
+        rejected_counts=quality_rejected_counts,
+        tvl_alias_sanity_counts=tvl_alias_sanity_counts,
+        max_fees_with_nonpositive_tvl_rate=args.max_fees_with_nonpositive_tvl_rate,
+        max_invalid_fee_tier_rate=args.max_invalid_fee_tier_rate,
+    )
+    excluded_schedule_sources = {
+        (row.source_name, row.version, row.chain)
+        for row in source_health_rows
+        if row.excluded_from_schedule
+    }
+    if excluded_schedule_sources:
+        print(
+            f"Excluding {len(excluded_schedule_sources)} source(s) from schedule optimization due to source-health gating.",
             file=sys.stderr,
         )
 
@@ -4906,7 +7239,7 @@ def main() -> int:
         thresholds=llama_thresholds,
         counts=llama_dropoff,
     )
-    schedules = build_liquidity_schedule(
+    schedules_all = build_liquidity_schedule(
         rankings=rankings,
         observations=observations,
         end_ts=end_ts,
@@ -4917,12 +7250,190 @@ def main() -> int:
         min_occurrences=args.schedule_min_occurrences,
         max_blocks_per_pool=args.schedule_max_blocks_per_pool,
     )
+    schedules = [
+        row
+        for row in schedules_all
+        if (row.source_name, row.version, row.chain) not in excluded_schedule_sources
+    ]
+    excluded_schedule_rows_by_source_health = max(0, len(schedules_all) - len(schedules))
+    spike_run_stats = compute_spike_run_stats(
+        observations=ranking_observations,
+        schedules=schedules,
+        end_ts=end_ts,
+        window_days=30,
+        global_min_threshold=0.0,
+        threshold_floor=0.001,
+        min_nonzero_hours=24,
+        nonzero_eps=1e-12,
+    )
+    run_stats_threshold_zero_pct, run_stats_always_spike_zero_avg_pct = compute_run_stats_sanity(
+        spike_run_stats
+    )
+    print(
+        (
+            "RunStats sanity: "
+            f"threshold==0: {run_stats_threshold_zero_pct:.2f}%, "
+            f"always-spike-with-zero-avg: {run_stats_always_spike_zero_avg_pct:.2f}%"
+        ),
+        file=sys.stderr,
+    )
+    if run_stats_threshold_zero_pct > 2.0 or run_stats_always_spike_zero_avg_pct > 2.0:
+        print(
+            "WARNING: run stats sanity exceeded 2%; investigate thresholding/history quality.",
+            file=sys.stderr,
+        )
+    schedule_enhanced = build_schedule_enhanced_rows(
+        schedules=schedules,
+        observations=ranking_observations,
+        rankings=rankings,
+        spike_stats=spike_run_stats,
+        end_ts=end_ts,
+        baseline_window_days=30,
+        baseline_top_k=200,
+        require_history_quality_ok=args.require_run_history_quality_ok,
+        min_incremental_usd_per_1000=args.min_incremental_usd_per_1000,
+        capacity_deploy_fraction_cap=args.capacity_deploy_fraction_cap,
+        capacity_warning_usd=args.schedule_min_max_deployable_usd,
+    )
+    deploy_scenarios = sorted(
+        {
+            1000.0,
+            10000.0,
+            float(args.default_deploy_usd),
+        }
+    )
+    max_moves_per_day_scenarios = sorted({1, 2, 4, 8, int(args.default_max_moves_per_day)})
+    schedule_summary_stats = summarize_schedule_enhanced(schedule_enhanced)
+    resolved_schedule_min_max_deployable_usd = resolve_schedule_min_max_deployable_usd(
+        rows=schedule_enhanced,
+        mode=args.schedule_min_max_deployable_mode,
+        fixed_value=args.schedule_min_max_deployable_usd,
+    )
+    print(
+        (
+            "Resolved schedule max deployable gate: "
+            f"mode={args.schedule_min_max_deployable_mode}, "
+            f"value={resolved_schedule_min_max_deployable_usd:.2f} USD"
+        ),
+        file=sys.stderr,
+    )
+    moves_day_curve = build_moves_day_curve(
+        schedule_rows=schedule_enhanced,
+        move_cost_scenarios=[0.0, 25.0, 50.0, 100.0, 250.0],
+        deploy_scenarios=deploy_scenarios,
+        max_moves_per_day_scenarios=max_moves_per_day_scenarios,
+        min_hold_hours=args.moves_min_hold_hours,
+        cooldown_hours_between_moves=args.moves_cooldown_hours,
+        objective=args.optimizer_objective,
+        schedule_min_max_deployable_usd=resolved_schedule_min_max_deployable_usd,
+        schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+        schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+    )
+    schedule_run_diagnostics = build_schedule_run_diagnostics(
+        schedule_rows=schedule_enhanced,
+        objective=args.optimizer_objective,
+        move_cost_scenarios=[0.0, 25.0, 50.0, 100.0, 250.0],
+        deploy_scenarios=deploy_scenarios,
+        max_moves_per_day_scenarios=max_moves_per_day_scenarios,
+        min_hold_hours=args.moves_min_hold_hours,
+        cooldown_hours_between_moves=args.moves_cooldown_hours,
+        schedule_min_max_deployable_usd=resolved_schedule_min_max_deployable_usd,
+        schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+        schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+        excluded_by_source_health=excluded_schedule_rows_by_source_health,
+    )
+    selected_plan_default = select_schedule_plan(
+        schedule_rows=schedule_enhanced,
+        objective=args.optimizer_objective,
+        move_cost_usd_per_move=args.default_move_cost_usd,
+        deploy_usd=args.default_deploy_usd,
+        max_moves_per_day=args.default_max_moves_per_day,
+        min_hold_hours=args.moves_min_hold_hours,
+        cooldown_hours_between_moves=args.moves_cooldown_hours,
+        schedule_min_max_deployable_usd=resolved_schedule_min_max_deployable_usd,
+        schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+        schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+    )
+    selected_plan_for_state = selected_plan_default
+    selected_plan_context = "active"
+    selected_plan_context_scenario = (
+        f"{args.optimizer_objective}|deploy={args.default_deploy_usd:.0f}|"
+        f"cost={args.default_move_cost_usd:.0f}|moves={args.default_max_moves_per_day}|"
+        f"hold={max(1, args.moves_min_hold_hours)}"
+    )
+    if not selected_plan_for_state:
+        fallback_curve = sorted(
+            [row for row in moves_day_curve if row.selected_blocks_count > 0 and row.objective == args.optimizer_objective],
+            key=lambda r: (r.total_net_usd, r.selected_blocks_count),
+            reverse=True,
+        )
+        if fallback_curve:
+            fb = fallback_curve[0]
+            selected_plan_for_state = select_schedule_plan(
+                schedule_rows=schedule_enhanced,
+                objective=fb.objective,
+                move_cost_usd_per_move=fb.move_cost_usd_per_move,
+                deploy_usd=fb.deploy_usd,
+                max_moves_per_day=fb.max_moves_per_day,
+                min_hold_hours=fb.min_hold_hours,
+                cooldown_hours_between_moves=fb.cooldown_hours_between_moves,
+                schedule_min_max_deployable_usd=resolved_schedule_min_max_deployable_usd,
+                schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+                schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+            )
+            if selected_plan_for_state:
+                selected_plan_context = "fallback"
+                selected_plan_context_scenario = (
+                    f"{fb.objective}|deploy={fb.deploy_usd:.0f}|"
+                    f"cost={fb.move_cost_usd_per_move:.0f}|moves={fb.max_moves_per_day}|"
+                    f"hold={max(1, fb.min_hold_hours)}"
+                )
+    active_plan_move_cost = args.default_move_cost_usd
+    active_plan_deploy_usd = args.default_deploy_usd
+    active_plan_max_moves = args.default_max_moves_per_day
+    if selected_plan_context == "fallback" and selected_plan_context_scenario:
+        fb_diag = next(
+            (row for row in schedule_run_diagnostics if row.scenario_id == selected_plan_context_scenario),
+            None,
+        )
+        if fb_diag is not None:
+            active_plan_move_cost = fb_diag.move_cost_usd_per_move
+            active_plan_deploy_usd = fb_diag.deploy_usd
+            active_plan_max_moves = fb_diag.max_moves_per_day
+    scenario_plan_csv = output_dir / (
+        f"selected_plan_{args.optimizer_objective}_cost{int(active_plan_move_cost)}_"
+        f"deploy{int(active_plan_deploy_usd)}_moves{int(active_plan_max_moves)}.csv"
+    )
+    matching_curve = [
+        row
+        for row in moves_day_curve
+        if row.objective == args.optimizer_objective
+        and abs(row.move_cost_usd_per_move - args.default_move_cost_usd) < 1e-9
+        and abs(row.deploy_usd - args.default_deploy_usd) < 1e-9
+        and row.max_moves_per_day == args.default_max_moves_per_day
+    ]
+    if matching_curve:
+        expected_blocks = matching_curve[0].selected_blocks_count
+        if expected_blocks != len(selected_plan_default):
+            raise RuntimeError(
+                "selected plan export mismatch: "
+                f"curve selected_blocks_count={expected_blocks}, "
+                f"plan_rows={len(selected_plan_default)}"
+            )
 
     hourly_csv = output_dir / "hourly_observations.csv"
     ranking_csv = output_dir / "pool_rankings.csv"
     ranking_diag_csv = output_dir / "pool_rankings_diagnostics.csv"
     summary_md = output_dir / "summary.md"
     schedule_csv = output_dir / "liquidity_schedule.csv"
+    schedule_enhanced_csv = output_dir / "schedule_enhanced.csv"
+    spike_run_stats_csv = output_dir / "spike_run_stats.csv"
+    moves_day_curve_csv = output_dir / "moves_day_curve.csv"
+    schedule_summary_stats_csv = output_dir / "schedule_summary_stats.csv"
+    schedule_run_diagnostics_csv = output_dir / "schedule_run_diagnostics.csv"
+    selected_plan_default_csv = output_dir / "selected_plan_default.csv"
+    source_health_csv = output_dir / "source_health.csv"
+    dashboard_state_json = output_dir / "dashboard_state.json"
     schedule_md = output_dir / "liquidity_schedule.md"
     v2_spike_csv = output_dir / "sushi_v2_yield_spikes.csv"
     llama_pair_hour_csv = output_dir / "llama_pair_hour_data.csv"
@@ -4930,11 +7441,52 @@ def main() -> int:
     llama_diag_csv = output_dir / "llama_run_diagnostics.csv"
     quality_csv = output_dir / "data_quality_audit.csv"
     report_html = output_dir / "report.html"
+    charts_dir = output_dir / args.charts_output_dir
+
+    chart_assets: dict[str, dict[str, str]] = {}
+    if args.charts_enable:
+        chart_assets = generate_pool_charts(
+            chart_dir=charts_dir,
+            observations=ranking_observations,
+            schedule_rows=schedule_enhanced,
+            end_ts=end_ts,
+            window_days=args.charts_window_days,
+            top_n=args.charts_top_n,
+        )
+    generated_now_ts = int(time.time())
 
     write_hourly_csv(hourly_csv, observations)
     write_rankings_csv(ranking_csv, rankings)
     write_pool_rankings_diagnostics_csv(ranking_diag_csv, ranking_diagnostics)
     write_schedule_csv(schedule_csv, schedules)
+    write_schedule_enhanced_csv(schedule_enhanced_csv, schedule_enhanced)
+    write_spike_run_stats_csv(spike_run_stats_csv, spike_run_stats)
+    write_moves_day_curve_csv(moves_day_curve_csv, moves_day_curve)
+    write_schedule_run_diagnostics_csv(schedule_run_diagnostics_csv, schedule_run_diagnostics)
+    write_schedule_summary_stats_csv(schedule_summary_stats_csv, schedule_summary_stats)
+    write_selected_plan_csv(selected_plan_default_csv, selected_plan_for_state)
+    write_selected_plan_csv(scenario_plan_csv, selected_plan_for_state)
+    write_source_health_csv(source_health_csv, source_health_rows)
+    write_dashboard_state_json(
+        path=dashboard_state_json,
+        generated_ts=generated_now_ts,
+        llama_diagnostics=llama_diagnostics,
+        llama_thresholds=llama_thresholds,
+        llama_rows=llama_rankings,
+        schedule_rows=schedule_enhanced,
+        selected_plan_rows=selected_plan_for_state,
+        source_health_rows=source_health_rows,
+        moves_day_curve=moves_day_curve,
+        schedule_run_diagnostics=schedule_run_diagnostics,
+        scenario_plan_filename=scenario_plan_csv.name,
+        default_move_cost_usd=args.default_move_cost_usd,
+        default_deploy_usd=args.default_deploy_usd,
+        default_max_moves_per_day=args.default_max_moves_per_day,
+        optimizer_objective=args.optimizer_objective,
+        chart_assets=chart_assets,
+        selected_plan_context=selected_plan_context,
+        selected_plan_context_scenario=selected_plan_context_scenario,
+    )
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
     write_llama_pair_hour_csv(llama_pair_hour_csv, llama_pair_hour_rows)
     write_llama_spike_csv(llama_rankings_csv, llama_rankings, llama_thresholds)
@@ -4944,6 +7496,7 @@ def main() -> int:
         input_rows=quality_input_rows,
         output_rows=quality_output_rows,
         rejected_counts=quality_rejected_counts,
+        source_input_counts=source_input_counts,
         tvl_alias_sanity_counts=tvl_alias_sanity_counts,
     )
     write_summary_md(
@@ -4964,6 +7517,10 @@ def main() -> int:
         report_html,
         rankings,
         schedules,
+        schedule_enhanced,
+        spike_run_stats,
+        moves_day_curve,
+        schedule_run_diagnostics,
         v2_spike_rows,
         llama_rankings,
         llama_thresholds,
@@ -4980,6 +7537,18 @@ def main() -> int:
         quality_input_rows=quality_input_rows,
         quality_output_rows=quality_output_rows,
         quality_rejected_rows=quality_rejected_rows,
+        run_stats_threshold_zero_pct=run_stats_threshold_zero_pct,
+        run_stats_always_spike_zero_avg_pct=run_stats_always_spike_zero_avg_pct,
+        require_run_history_quality_ok=args.require_run_history_quality_ok,
+        optimizer_objective=args.optimizer_objective,
+        default_deploy_usd=args.default_deploy_usd,
+        default_move_cost_usd=args.default_move_cost_usd,
+        default_max_moves_per_day=args.default_max_moves_per_day,
+        schedule_summary_stats=schedule_summary_stats,
+        selected_plan_rows=selected_plan_for_state,
+        source_health_rows=source_health_rows,
+        chart_assets=chart_assets,
+        scenario_plan_filename=scenario_plan_csv.name,
     )
 
     print_top(rankings, args.top)
@@ -5009,6 +7578,17 @@ def main() -> int:
     print(f"Wrote: {ranking_diag_csv}", file=sys.stderr)
     print(f"Wrote: {summary_md}", file=sys.stderr)
     print(f"Wrote: {schedule_csv}", file=sys.stderr)
+    print(f"Wrote: {schedule_enhanced_csv}", file=sys.stderr)
+    print(f"Wrote: {spike_run_stats_csv}", file=sys.stderr)
+    print(f"Wrote: {moves_day_curve_csv}", file=sys.stderr)
+    print(f"Wrote: {schedule_run_diagnostics_csv}", file=sys.stderr)
+    print(f"Wrote: {schedule_summary_stats_csv}", file=sys.stderr)
+    print(f"Wrote: {selected_plan_default_csv}", file=sys.stderr)
+    print(f"Wrote: {scenario_plan_csv}", file=sys.stderr)
+    print(f"Wrote: {source_health_csv}", file=sys.stderr)
+    print(f"Wrote: {dashboard_state_json}", file=sys.stderr)
+    if args.charts_enable:
+        print(f"Wrote charts: {charts_dir}", file=sys.stderr)
     print(f"Wrote: {schedule_md}", file=sys.stderr)
     print(f"Wrote: {v2_spike_csv}", file=sys.stderr)
     print(f"Wrote: {llama_pair_hour_csv}", file=sys.stderr)

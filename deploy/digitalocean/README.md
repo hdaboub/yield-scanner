@@ -81,3 +81,42 @@ sudo systemctl restart uniswap-jobs.service
 ```bash
 sudo systemctl start uniswap-jobs.service
 ```
+
+## Operator Dashboard (Local)
+
+Run the local dashboard against pulled artifacts and your droplet:
+
+```bash
+python3 deploy/digitalocean/ops_dashboard.py \
+  --bind 127.0.0.1 \
+  --port 8787 \
+  --host <DROPLET_IP> \
+  --artifacts-dir output_from_droplet/multichain_3w
+```
+
+Key APIs:
+
+- `GET /api/state` (reads `dashboard_state.json`)
+- `GET /api/spikes`
+- `GET /api/schedule`
+- `GET /api/pool/<pool_id>`
+- `GET /api/files/<relative_path>` (charts/csv/html from artifacts dir)
+
+Dashboard pages:
+
+- `http://127.0.0.1:8787/` (Ops controls + logs)
+- `http://127.0.0.1:8787/pools` (Pool/strategy visual dashboard: top pools, live spikes, executable plan, frontier, source health)
+
+Manual report service controls from dashboard:
+
+- Start/stop an on-demand scanner run as a transient systemd service (`uniswap-manual-report.service`)
+- Control run parameters from UI:
+  - hours, workers, top, page-size
+  - optimizer objective
+  - deploy USD, move cost, max moves/day
+  - output subdirectory
+- APIs:
+  - `POST /api/report/start`
+  - `POST /api/report/stop`
+  - `GET /api/report/status`
+  - `GET /api/report/logs`

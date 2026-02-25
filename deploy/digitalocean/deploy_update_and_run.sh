@@ -116,6 +116,7 @@ ExecStart=/bin/bash -lc '/opt/uniswap-yield-scanner/.venv/bin/python scanner.py 
   --top 25 \
   --schedule-top-pools 25 \
   --schedule-min-occurrences 2 \
+  --require-run-history-quality-ok \
   --output-dir output/multichain_3w \
   --no-open-report && \
 /opt/uniswap-yield-scanner/.venv/bin/python backtest_lp.py \
@@ -153,6 +154,7 @@ ExecStart=/bin/bash -lc '/opt/uniswap-yield-scanner/.venv/bin/python scanner.py 
   --top 5 \
   --schedule-top-pools 5 \
   --schedule-min-occurrences 2 \
+  --require-run-history-quality-ok \
   --output-dir output/backfill_multichain \
   --no-open-report'
 EOF
