@@ -87,6 +87,7 @@ class Observation:
     tvl_usd: float
     fees_usd: float | None
     hourly_yield: float | None
+    tvl_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -492,6 +493,29 @@ class LlamaRunDiagnostics:
     seed_last_block: int | None
     empty_stage: str | None
     empty_message: str
+    requested_window_end_ts: int | None = None
+    effective_window_end_ts: int | None = None
+    indexed_tip_block_ts: int | None = None
+    indexed_tip_block_utc: str = ""
+    indexed_tip_block_local: str = ""
+    index_lag_blocks: int | None = None
+    index_lag_hours: float | None = None
+    index_window_clamped: bool = False
+    pages_fetched: int = 0
+    fetched_min_hour_start_unix: int | None = None
+    fetched_max_hour_start_unix: int | None = None
+    graphql_page_errors: int = 0
+    graphql_last_error: str = ""
+
+
+@dataclass(frozen=True)
+class LlamaFetchDiagnostics:
+    pages_fetched: int
+    fetched_raw_rows: int
+    min_hour_start_unix: int | None
+    max_hour_start_unix: int | None
+    graphql_page_errors: int = 0
+    graphql_last_error: str = ""
 
 
 def trimmed_mean(values: list[float], trim_ratio: float) -> float:
@@ -782,6 +806,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Target minimum llama ranked rows before stopping fallback relaxation (default: 20).",
+    )
+    parser.add_argument(
+        "--llama-eth-rpc-url",
+        default=os.getenv("LLAMA_ETH_RPC_URL", os.getenv("ETH_RPC_URL", "https://cloudflare-eth.com")),
+        help=(
+            "Ethereum JSON-RPC endpoint used to map llama _meta.block.number to timestamp for lag detection "
+            "(default: $LLAMA_ETH_RPC_URL, then $ETH_RPC_URL, then Cloudflare)."
+        ),
     )
     parser.add_argument(
         "--min-tvl-usd",
@@ -1486,10 +1518,9 @@ def normalize_row(source: SourceConfig, row: dict[str, Any]) -> Observation | No
 
     volume_usd = to_float(row.get("volumeUSD"), default=0.0)
     # Support either aliased tvlUSD or common raw field fallback.
-    tvl_usd = to_float(
-        row.get("tvlUSD", row.get("totalValueLockedUSD", row.get("liquidityUSD"))),
-        default=0.0,
-    )
+    tvl_raw = row.get("tvlUSD", row.get("totalValueLockedUSD", row.get("liquidityUSD")))
+    tvl_missing = tvl_raw is None or (isinstance(tvl_raw, str) and not tvl_raw.strip())
+    tvl_usd = to_float(tvl_raw, default=0.0)
 
     pool_id = str(pool.get("id", row.get("poolId", ""))).strip()
     if not pool_id:
@@ -1535,6 +1566,7 @@ def normalize_row(source: SourceConfig, row: dict[str, Any]) -> Observation | No
         tvl_usd=tvl_usd,
         fees_usd=fees_usd,
         hourly_yield=hourly_yield,
+        tvl_missing=tvl_missing,
     )
 
 
@@ -1583,8 +1615,16 @@ def classify_quality_rejection(
     ):
         return "dynamic_fee_rate_gt_10pct"
     if (not is_v2_spike) and obs.fees_usd is not None and obs.tvl_usd <= 0:
+        if obs.tvl_missing:
+            return "fees_with_missing_tvl"
+        if obs.tvl_usd == 0:
+            return "fees_with_zero_tvl"
         return "fees_with_nonpositive_tvl"
     if obs.tvl_usd <= 0:
+        if obs.tvl_missing:
+            return "missing_tvl"
+        if obs.tvl_usd == 0:
+            return "zero_tvl"
         return "nonpositive_tvl"
     if (not is_v2_spike) and obs.tvl_usd < max(0.0, min_tvl_usd):
         return "tvl_below_floor"
@@ -1846,6 +1886,135 @@ def fetch_llama_runtime_state(
     )
 
 
+def _eth_rpc_call(
+    rpc_url: str,
+    method: str,
+    params: list[Any],
+    timeout: int,
+    retries: int,
+) -> Any:
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "uniswap-yield-scanner/1.0",
+    }
+    last_err: Exception | None = None
+    for attempt in range(1, max(1, retries) + 1):
+        req = urllib.request.Request(rpc_url, data=payload, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8")
+            parsed = json.loads(body)
+            if "error" in parsed:
+                raise RuntimeError(str(parsed["error"]))
+            return parsed.get("result")
+        except Exception as err:  # noqa: BLE001
+            last_err = err
+            if attempt < max(1, retries):
+                time.sleep(min(2**attempt, 8))
+                continue
+            return None
+    if last_err is not None:
+        return None
+    return None
+
+
+def _parse_hex_int(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text.startswith("0x"):
+            try:
+                return int(text, 16)
+            except ValueError:
+                return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    return None
+
+
+def fetch_eth_block_timestamp(
+    rpc_url: str,
+    block_number: int,
+    timeout: int,
+    retries: int,
+) -> int | None:
+    if not rpc_url or block_number <= 0:
+        return None
+    block_hex = hex(block_number)
+    result = _eth_rpc_call(
+        rpc_url=rpc_url,
+        method="eth_getBlockByNumber",
+        params=[block_hex, False],
+        timeout=timeout,
+        retries=retries,
+    )
+    if not isinstance(result, dict):
+        return None
+    return _parse_hex_int(result.get("timestamp"))
+
+
+def fetch_eth_latest_block_number(
+    rpc_url: str,
+    timeout: int,
+    retries: int,
+) -> int | None:
+    if not rpc_url:
+        return None
+    result = _eth_rpc_call(
+        rpc_url=rpc_url,
+        method="eth_blockNumber",
+        params=[],
+        timeout=timeout,
+        retries=retries,
+    )
+    return _parse_hex_int(result)
+
+
+def resolve_llama_effective_window_end_ts(
+    runtime: LlamaRuntimeState | None,
+    requested_end_ts: int,
+    rpc_url: str,
+    timeout: int,
+    retries: int,
+) -> tuple[int, int | None, int | None, int | None, bool]:
+    requested_end = max(0, requested_end_ts)
+    if runtime is None or runtime.meta_block_number is None:
+        return requested_end, None, None, None, False
+    indexed_tip_ts = fetch_eth_block_timestamp(
+        rpc_url=rpc_url,
+        block_number=runtime.meta_block_number,
+        timeout=timeout,
+        retries=retries,
+    )
+    latest_block = fetch_eth_latest_block_number(
+        rpc_url=rpc_url,
+        timeout=timeout,
+        retries=retries,
+    )
+    lag_blocks: int | None = None
+    if latest_block is not None and runtime.meta_block_number is not None:
+        lag_blocks = max(0, latest_block - runtime.meta_block_number)
+    if indexed_tip_ts is None:
+        return requested_end, None, latest_block, lag_blocks, False
+    indexed_hour_ceiling = floor_to_hour(indexed_tip_ts) + SECONDS_PER_HOUR
+    effective_end = min(requested_end, indexed_hour_ceiling)
+    return effective_end, indexed_tip_ts, latest_block, lag_blocks, effective_end < requested_end
+
+
 def summarize_llama_dropoff(counts: LlamaDropoffCounters) -> tuple[str | None, str]:
     stages = [
         ("fetched_raw_rows", counts.fetched_raw_rows),
@@ -1887,9 +2056,14 @@ def build_llama_diagnostics(
     runtime: LlamaRuntimeState | None,
     window_start_ts: int,
     window_end_ts: int,
+    requested_window_end_ts: int,
     local_timezone: str,
     thresholds: LlamaAdaptiveThresholds | None,
     counts: LlamaDropoffCounters,
+    indexed_tip_block_ts: int | None,
+    index_lag_blocks: int | None,
+    index_window_clamped: bool,
+    fetch_diag: LlamaFetchDiagnostics | None,
 ) -> LlamaRunDiagnostics | None:
     if source is None:
         return None
@@ -1918,6 +2092,31 @@ def build_llama_diagnostics(
         seed_last_block=(runtime.seed_last_block if runtime is not None else None),
         empty_stage=empty_stage,
         empty_message=empty_message,
+        requested_window_end_ts=requested_window_end_ts,
+        effective_window_end_ts=window_end_ts,
+        indexed_tip_block_ts=indexed_tip_block_ts,
+        indexed_tip_block_utc=(iso_hour(indexed_tip_block_ts) if indexed_tip_block_ts is not None else ""),
+        indexed_tip_block_local=(
+            iso_hour_local(indexed_tip_block_ts, local_timezone)
+            if indexed_tip_block_ts is not None
+            else ""
+        ),
+        index_lag_blocks=index_lag_blocks,
+        index_lag_hours=(
+            (max(0.0, requested_window_end_ts - window_end_ts) / 3600.0)
+            if requested_window_end_ts is not None
+            else None
+        ),
+        index_window_clamped=index_window_clamped,
+        pages_fetched=(fetch_diag.pages_fetched if fetch_diag is not None else 0),
+        fetched_min_hour_start_unix=(
+            fetch_diag.min_hour_start_unix if fetch_diag is not None else None
+        ),
+        fetched_max_hour_start_unix=(
+            fetch_diag.max_hour_start_unix if fetch_diag is not None else None
+        ),
+        graphql_page_errors=(fetch_diag.graphql_page_errors if fetch_diag is not None else 0),
+        graphql_last_error=(fetch_diag.graphql_last_error if fetch_diag is not None else ""),
     )
 
 
@@ -1957,11 +2156,13 @@ def fetch_llama_pair_hour_rows(
     max_pages: int | None,
     timeout: int,
     retries: int,
-) -> tuple[list[LlamaPairHourRow], int]:
+) -> tuple[list[LlamaPairHourRow], int, LlamaFetchDiagnostics]:
     cursor_end = end_ts - 1
     pages = 0
     raw_rows: list[dict[str, Any]] = []
     pair_ids: set[str] = set()
+    min_hour_returned: int | None = None
+    max_hour_returned: int | None = None
     while cursor_end >= start_ts:
         data = graphql_query(
             source=source,
@@ -1993,6 +2194,10 @@ def fetch_llama_pair_hour_rows(
             item["__pair_id"] = pair_id
             raw_rows.append(item)
             pair_ids.add(pair_id)
+            if min_hour_returned is None or hour_ts < min_hour_returned:
+                min_hour_returned = hour_ts
+            if max_hour_returned is None or hour_ts > max_hour_returned:
+                max_hour_returned = hour_ts
             if min_hour_seen is None or hour_ts < min_hour_seen:
                 min_hour_seen = hour_ts
         pages += 1
@@ -2097,7 +2302,13 @@ def fetch_llama_pair_hour_rows(
             )
         )
     output.sort(key=lambda r: (r.hour_start_unix, r.pair))
-    return output, len(raw_rows)
+    fetch_diag = LlamaFetchDiagnostics(
+        pages_fetched=pages,
+        fetched_raw_rows=len(raw_rows),
+        min_hour_start_unix=min_hour_returned,
+        max_hour_start_unix=max_hour_returned,
+    )
+    return output, len(raw_rows), fetch_diag
 
 
 def build_llama_spike_rankings(
@@ -5582,6 +5793,24 @@ def write_dashboard_state_json(
             "seed_last_block": (llama_diagnostics.seed_last_block if llama_diagnostics is not None else None),
             "window_start_ts": (llama_diagnostics.window_start_ts if llama_diagnostics is not None else None),
             "window_end_ts": (llama_diagnostics.window_end_ts if llama_diagnostics is not None else None),
+            "requested_window_end_ts": (
+                llama_diagnostics.requested_window_end_ts if llama_diagnostics is not None else None
+            ),
+            "effective_window_end_ts": (
+                llama_diagnostics.effective_window_end_ts if llama_diagnostics is not None else None
+            ),
+            "indexed_tip_block_ts": (
+                llama_diagnostics.indexed_tip_block_ts if llama_diagnostics is not None else None
+            ),
+            "index_lag_blocks": (
+                llama_diagnostics.index_lag_blocks if llama_diagnostics is not None else None
+            ),
+            "index_lag_hours": (
+                llama_diagnostics.index_lag_hours if llama_diagnostics is not None else None
+            ),
+            "index_window_clamped": (
+                llama_diagnostics.index_window_clamped if llama_diagnostics is not None else False
+            ),
             "thresholds": (
                 {
                     "band": llama_thresholds.band,
@@ -5599,6 +5828,11 @@ def write_dashboard_state_json(
             ),
             "dropoff": (
                 {
+                    "pages_fetched": llama_diagnostics.pages_fetched,
+                    "fetched_min_hour_start_unix": llama_diagnostics.fetched_min_hour_start_unix,
+                    "fetched_max_hour_start_unix": llama_diagnostics.fetched_max_hour_start_unix,
+                    "graphql_page_errors": llama_diagnostics.graphql_page_errors,
+                    "graphql_last_error": llama_diagnostics.graphql_last_error,
                     "fetched_raw_rows": llama_diagnostics.counts.fetched_raw_rows,
                     "after_time_window_filter": llama_diagnostics.counts.after_time_window_filter,
                     "after_min_swaps_filter": llama_diagnostics.counts.after_min_swaps_filter,
@@ -5945,6 +6179,15 @@ def write_llama_diagnostics_csv(path: Path, diagnostics: LlamaRunDiagnostics | N
                 "window_end_utc",
                 "window_start_local",
                 "window_end_local",
+                "requested_window_end_utc",
+                "requested_window_end_local",
+                "effective_window_end_utc",
+                "effective_window_end_local",
+                "indexed_tip_block_utc",
+                "indexed_tip_block_local",
+                "index_lag_blocks",
+                "index_lag_hours",
+                "index_window_clamped",
                 "thresholds_label",
                 "min_swap_count",
                 "min_weth_liquidity",
@@ -5961,6 +6204,11 @@ def write_llama_diagnostics_csv(path: Path, diagnostics: LlamaRunDiagnostics | N
                 "after_spike_multiplier_filter",
                 "after_persistence_filter",
                 "final_ranked_rows",
+                "pages_fetched",
+                "fetched_min_hour_utc",
+                "fetched_max_hour_utc",
+                "graphql_page_errors",
+                "graphql_last_error",
                 "empty_stage",
                 "empty_message",
             ]
@@ -5980,6 +6228,35 @@ def write_llama_diagnostics_csv(path: Path, diagnostics: LlamaRunDiagnostics | N
                 iso_hour(diagnostics.window_end_ts),
                 iso_hour_local(diagnostics.window_start_ts, diagnostics.local_timezone),
                 iso_hour_local(diagnostics.window_end_ts, diagnostics.local_timezone),
+                (
+                    iso_hour(diagnostics.requested_window_end_ts)
+                    if diagnostics.requested_window_end_ts is not None
+                    else ""
+                ),
+                (
+                    iso_hour_local(diagnostics.requested_window_end_ts, diagnostics.local_timezone)
+                    if diagnostics.requested_window_end_ts is not None
+                    else ""
+                ),
+                (
+                    iso_hour(diagnostics.effective_window_end_ts)
+                    if diagnostics.effective_window_end_ts is not None
+                    else ""
+                ),
+                (
+                    iso_hour_local(diagnostics.effective_window_end_ts, diagnostics.local_timezone)
+                    if diagnostics.effective_window_end_ts is not None
+                    else ""
+                ),
+                diagnostics.indexed_tip_block_utc,
+                diagnostics.indexed_tip_block_local,
+                diagnostics.index_lag_blocks,
+                (
+                    f"{diagnostics.index_lag_hours:.6f}"
+                    if diagnostics.index_lag_hours is not None
+                    else ""
+                ),
+                diagnostics.index_window_clamped,
                 diagnostics.thresholds_label,
                 diagnostics.min_swap_count,
                 (
@@ -6004,6 +6281,19 @@ def write_llama_diagnostics_csv(path: Path, diagnostics: LlamaRunDiagnostics | N
                 diagnostics.counts.after_spike_multiplier_filter,
                 diagnostics.counts.after_persistence_filter,
                 diagnostics.counts.final_ranked_rows,
+                diagnostics.pages_fetched,
+                (
+                    iso_hour(diagnostics.fetched_min_hour_start_unix)
+                    if diagnostics.fetched_min_hour_start_unix is not None
+                    else ""
+                ),
+                (
+                    iso_hour(diagnostics.fetched_max_hour_start_unix)
+                    if diagnostics.fetched_max_hour_start_unix is not None
+                    else ""
+                ),
+                diagnostics.graphql_page_errors,
+                diagnostics.graphql_last_error,
                 diagnostics.empty_stage,
                 diagnostics.empty_message,
             ]
@@ -6404,6 +6694,16 @@ def write_report_html(
     llama_diag_banner = ""
     if llama_diagnostics is not None:
         d = llama_diagnostics
+        clamp_note = ""
+        if d.index_window_clamped:
+            clamp_note = (
+                "<br/><strong>Index lag:</strong> "
+                f"llama indexed tip {html.escape(d.indexed_tip_block_utc or 'n/a')} "
+                f"({html.escape(d.indexed_tip_block_local or 'n/a')}), "
+                f"lag={('n/a' if d.index_lag_hours is None else f'{d.index_lag_hours:.2f}h')} / "
+                f"{('n/a' if d.index_lag_blocks is None else str(d.index_lag_blocks) + ' blocks')}. "
+                "Llama analysis window end was truncated to indexed coverage."
+            )
         zero_fetch_hint = ""
         if d.counts.fetched_raw_rows == 0:
             zero_fetch_hint = (
@@ -6423,6 +6723,14 @@ def write_report_html(
             f"{('n/a' if d.seed_total is None else d.seed_total)}, "
             f"seedLastBlock={('n/a' if d.seed_last_block is None else d.seed_last_block)}.<br/>"
             f"Window (CST): {html.escape(format_ts_cst(d.window_start_ts))} -> {html.escape(format_ts_cst(d.window_end_ts))}.<br/>"
+            f"Requested window end (CST): {html.escape(format_ts_cst(d.requested_window_end_ts or d.window_end_ts))}; "
+            f"effective llama window (CST): {html.escape(format_ts_cst(d.window_start_ts))} -> {html.escape(format_ts_cst(d.window_end_ts))}.{clamp_note}<br/>"
+            "Fetch health: "
+            f"pages={d.pages_fetched}, "
+            f"returned_range_utc={html.escape(iso_hour(d.fetched_min_hour_start_unix) if d.fetched_min_hour_start_unix is not None else 'n/a')} "
+            f"-> {html.escape(iso_hour(d.fetched_max_hour_start_unix) if d.fetched_max_hour_start_unix is not None else 'n/a')}, "
+            f"graphql_page_errors={d.graphql_page_errors}"
+            f"{(' (' + html.escape(d.graphql_last_error) + ')') if d.graphql_last_error else ''}.<br/>"
             "Dropoff counts: "
             f"fetched={d.counts.fetched_raw_rows}, "
             f"after_window={d.counts.after_time_window_filter}, "
@@ -6561,6 +6869,7 @@ def write_report_html(
         <a href="schedule_run_diagnostics.csv">schedule_run_diagnostics.csv</a>
         <a href="schedule_summary_stats.csv">schedule_summary_stats.csv</a>
         <a href="selected_plan_default.csv">selected_plan_default.csv</a>
+        <a href="selected_plan_active.csv">selected_plan_active.csv</a>
         <a href="{html.escape(scenario_plan_filename)}">{html.escape(scenario_plan_filename)}</a>
         <a href="dashboard_state.json">dashboard_state.json</a>
         <a href="source_health.csv">source_health.csv</a>
@@ -7141,25 +7450,66 @@ def main() -> int:
     llama_pair_hour_rows: list[LlamaPairHourRow] = []
     llama_fetched_raw_rows = 0
     llama_runtime_state: LlamaRuntimeState | None = None
+    llama_requested_end_ts = end_ts
+    llama_effective_end_ts = end_ts
+    llama_indexed_tip_ts: int | None = None
+    llama_index_lag_blocks: int | None = None
+    llama_index_window_clamped = False
+    llama_fetch_diag = LlamaFetchDiagnostics(
+        pages_fetched=0,
+        fetched_raw_rows=0,
+        min_hour_start_unix=None,
+        max_hour_start_unix=None,
+        graphql_page_errors=0,
+        graphql_last_error="",
+    )
     for source in llama_sources:
         try:
-            source_rows, source_raw_count = fetch_llama_pair_hour_rows(
-                source=source,
-                start_ts=start_ts,
-                end_ts=end_ts,
-                page_size=effective_page_size(source, args.page_size),
-                max_pages=args.max_pages_per_source,
-                timeout=args.timeout,
-                retries=args.retries,
-            )
             if llama_runtime_state is None:
                 llama_runtime_state = fetch_llama_runtime_state(
                     source=source,
                     timeout=args.timeout,
                     retries=args.retries,
                 )
+                (
+                    llama_effective_end_ts,
+                    llama_indexed_tip_ts,
+                    _llama_latest_block,
+                    llama_index_lag_blocks,
+                    llama_index_window_clamped,
+                ) = resolve_llama_effective_window_end_ts(
+                    runtime=llama_runtime_state,
+                    requested_end_ts=end_ts,
+                    rpc_url=args.llama_eth_rpc_url,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                )
+                if llama_index_window_clamped:
+                    lag_hours = max(0.0, (end_ts - llama_effective_end_ts) / 3600.0)
+                    print(
+                        (
+                            "Llama index lag detected: "
+                            f"requested_end={iso_hour(end_ts)}, "
+                            f"indexed_tip={iso_hour(llama_indexed_tip_ts or 0)}, "
+                            f"effective_end={iso_hour(llama_effective_end_ts)}, "
+                            f"lag_hours={lag_hours:.2f}, "
+                            f"lag_blocks={llama_index_lag_blocks if llama_index_lag_blocks is not None else 'n/a'}"
+                        ),
+                        file=sys.stderr,
+                    )
+            source_rows, source_raw_count, source_fetch_diag = fetch_llama_pair_hour_rows(
+                source=source,
+                start_ts=start_ts,
+                end_ts=llama_effective_end_ts,
+                page_size=effective_page_size(source, args.page_size),
+                max_pages=args.max_pages_per_source,
+                timeout=args.timeout,
+                retries=args.retries,
+            )
             llama_pair_hour_rows.extend(source_rows)
             llama_fetched_raw_rows += source_raw_count
+            if source_fetch_diag.pages_fetched > llama_fetch_diag.pages_fetched:
+                llama_fetch_diag = source_fetch_diag
             print(
                 (
                     f"{source.name}: fetched {len(source_rows):,} llama PairHourData rows "
@@ -7168,6 +7518,14 @@ def main() -> int:
                 file=sys.stderr,
             )
         except Exception as err:  # noqa: BLE001
+            llama_fetch_diag = LlamaFetchDiagnostics(
+                pages_fetched=llama_fetch_diag.pages_fetched,
+                fetched_raw_rows=llama_fetch_diag.fetched_raw_rows,
+                min_hour_start_unix=llama_fetch_diag.min_hour_start_unix,
+                max_hour_start_unix=llama_fetch_diag.max_hour_start_unix,
+                graphql_page_errors=llama_fetch_diag.graphql_page_errors + 1,
+                graphql_last_error=str(err),
+            )
             print(
                 f"{source.name}: failed to fetch llama pair-hour rows for report output: {err}",
                 file=sys.stderr,
@@ -7234,10 +7592,15 @@ def main() -> int:
         source=(llama_sources[0] if llama_sources else None),
         runtime=llama_runtime_state,
         window_start_ts=start_ts,
-        window_end_ts=end_ts,
+        window_end_ts=llama_effective_end_ts,
+        requested_window_end_ts=llama_requested_end_ts,
         local_timezone=args.local_timezone,
         thresholds=llama_thresholds,
         counts=llama_dropoff,
+        indexed_tip_block_ts=llama_indexed_tip_ts,
+        index_lag_blocks=llama_index_lag_blocks,
+        index_window_clamped=llama_index_window_clamped,
+        fetch_diag=llama_fetch_diag,
     )
     schedules_all = build_liquidity_schedule(
         rankings=rankings,
@@ -7432,6 +7795,7 @@ def main() -> int:
     schedule_summary_stats_csv = output_dir / "schedule_summary_stats.csv"
     schedule_run_diagnostics_csv = output_dir / "schedule_run_diagnostics.csv"
     selected_plan_default_csv = output_dir / "selected_plan_default.csv"
+    selected_plan_active_csv = output_dir / "selected_plan_active.csv"
     source_health_csv = output_dir / "source_health.csv"
     dashboard_state_json = output_dir / "dashboard_state.json"
     schedule_md = output_dir / "liquidity_schedule.md"
@@ -7465,6 +7829,7 @@ def main() -> int:
     write_schedule_run_diagnostics_csv(schedule_run_diagnostics_csv, schedule_run_diagnostics)
     write_schedule_summary_stats_csv(schedule_summary_stats_csv, schedule_summary_stats)
     write_selected_plan_csv(selected_plan_default_csv, selected_plan_for_state)
+    write_selected_plan_csv(selected_plan_active_csv, selected_plan_for_state)
     write_selected_plan_csv(scenario_plan_csv, selected_plan_for_state)
     write_source_health_csv(source_health_csv, source_health_rows)
     write_dashboard_state_json(
@@ -7584,6 +7949,7 @@ def main() -> int:
     print(f"Wrote: {schedule_run_diagnostics_csv}", file=sys.stderr)
     print(f"Wrote: {schedule_summary_stats_csv}", file=sys.stderr)
     print(f"Wrote: {selected_plan_default_csv}", file=sys.stderr)
+    print(f"Wrote: {selected_plan_active_csv}", file=sys.stderr)
     print(f"Wrote: {scenario_plan_csv}", file=sys.stderr)
     print(f"Wrote: {source_health_csv}", file=sys.stderr)
     print(f"Wrote: {dashboard_state_json}", file=sys.stderr)

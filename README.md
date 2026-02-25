@@ -218,6 +218,20 @@ Important: if `--schedule-min-occurrences` is `2`, you generally need at least 3
 
 - Use multiple sources to cover all chains and both protocol versions.
 - Set `UNISWAP_V4_ENDPOINT` (or your own env var names) if your endpoint is env-based.
+
+## Interactive Dashboard (Streamlit)
+
+A lightweight artifacts-driven dashboard is available under `dashboard/`.
+
+```bash
+pip install streamlit pandas plotly
+YIELD_SCANNER_ARTIFACTS=output_from_droplet/multichain_3w streamlit run dashboard/app.py
+```
+
+## Llama Subgraph Source
+
+- Subgraph source is tracked in `subgraphs/llama/`.
+- Build/deploy notes are in `subgraphs/llama/README.md`.
 - Source endpoints can use shell-style env references such as `${UNISWAP_V4_ENDPOINT}`.
 - Source headers can also use env references (for example `Authorization: Bearer ${TOKEN}`).
 - By default, a failed source is skipped and the scan continues. Add `--strict-sources` to fail the full run on any source error.
