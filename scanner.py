@@ -353,6 +353,8 @@ class SourceHealthRow:
     tvl_below_floor_rate: float
     invalid_fee_tier_count: int
     invalid_fee_tier_rate: float
+    implied_fee_anomaly_count: int
+    implied_fee_anomaly_rate: float
     excluded_from_schedule: bool
     exclusion_reason: str
 
@@ -678,6 +680,23 @@ def parse_args() -> argparse.Namespace:
         help="Maximum recommended add/remove blocks per pool (default: 3).",
     )
     parser.add_argument(
+        "--schedule-min-observed-days",
+        type=float,
+        default=14.0,
+        help="Minimum observed history (days) for a pool to be schedule-eligible (default: 14).",
+    )
+    parser.add_argument(
+        "--schedule-min-block-target",
+        type=int,
+        default=3,
+        help="Target minimum number of schedule blocks; fallback relaxes if below this (default: 3).",
+    )
+    parser.add_argument(
+        "--disable-schedule-relaxation",
+        action="store_true",
+        help="Disable progressive schedule fallback relaxation when schedule block count is sparse.",
+    )
+    parser.add_argument(
         "--llama-schedule-mode",
         choices=["off", "merge", "llama_only"],
         default="off",
@@ -969,6 +988,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.10,
         help="Exclude schedule sources if invalid_fee_tier_count / input_rows exceeds this rate (default: 0.10).",
+    )
+    parser.add_argument(
+        "--max-implied-fee-rate",
+        type=float,
+        default=0.05,
+        help="Reject non-v2 rows when implied_fee_rate=fees_usd/volume_usd exceeds this cap (default: 0.05).",
+    )
+    parser.add_argument(
+        "--max-implied-fee-anomaly-rate",
+        type=float,
+        default=0.10,
+        help="Exclude schedule sources if implied_fee_rate anomaly reject rate exceeds this value (default: 0.10).",
     )
     parser.add_argument(
         "--charts-enable",
@@ -1470,17 +1501,17 @@ def sanitize_hourly_fees_usd(
     if implied_fee_rate < 0 or implied_fee_rate > 1.0:
         return None
 
-    if source_type != "v2_spike" and implied_fee_rate > 0.10:
+    if source_type != "v2_spike" and implied_fee_rate > 0.05:
         return None
 
     if fee_tier <= 1_000_000:
         expected_rate = fee_tier / 1_000_000
         # Allow some slippage in subgraph values, but reject extreme mismatches.
-        if expected_rate > 0 and implied_fee_rate > max(0.10, expected_rate * 5.0):
+        if expected_rate > 0 and implied_fee_rate > max(0.05, expected_rate * 5.0):
             return None
     else:
         # Encoded/dynamic fee tiers often use non-percent integers; reject implausibly high rates.
-        if implied_fee_rate > 0.10:
+        if implied_fee_rate > 0.05:
             return None
     return fees_usd
 
@@ -1602,6 +1633,7 @@ def classify_quality_rejection(
     min_tvl_usd: float,
     max_hourly_yield_pct: float | None,
     v2_spike_sources: set[str] | None = None,
+    max_implied_fee_rate: float = 0.05,
 ) -> str | None:
     is_v2_spike = v2_spike_sources is not None and obs.source_name in v2_spike_sources
     if (not is_v2_spike) and obs.fee_tier == 999_999:
@@ -1610,6 +1642,12 @@ def classify_quality_rejection(
         (obs.fees_usd / obs.volume_usd)
         if obs.fees_usd is not None and obs.volume_usd > 0
         else None
+    )
+    implied_fee_cap = max(0.0, min(1.0, max_implied_fee_rate))
+    implied_fee_reason = (
+        "implied_fee_rate_gt_10pct"
+        if abs(implied_fee_cap - 0.10) < 1e-12
+        else "implied_fee_rate_gt_cap"
     )
     if obs.volume_usd < 0:
         return "negative_volume"
@@ -1622,23 +1660,23 @@ def classify_quality_rejection(
     if (
         not is_v2_spike
         and implied_fee_rate is not None
-        and implied_fee_rate > 0.10
+        and implied_fee_rate > implied_fee_cap
         and obs.fee_tier >= 100_000
     ):
         return "invalid_fee_tier"
     if (
         not is_v2_spike
         and implied_fee_rate is not None
-        and implied_fee_rate > 0.10
+        and implied_fee_rate > implied_fee_cap
     ):
-        return "implied_fee_rate_gt_10pct"
+        return implied_fee_reason
     if (
         not is_v2_spike
         and
         obs.fees_usd is not None
         and obs.volume_usd > 0
         and obs.fee_tier > 1_000_000
-        and (obs.fees_usd / obs.volume_usd) > 0.10
+        and (obs.fees_usd / obs.volume_usd) > implied_fee_cap
     ):
         return "dynamic_fee_rate_gt_10pct"
     if (not is_v2_spike) and obs.fees_usd is not None and obs.tvl_usd <= 0:
@@ -1670,6 +1708,7 @@ def filter_observations_with_quality_audit(
     min_tvl_usd: float,
     max_hourly_yield_pct: float | None,
     v2_spike_sources: set[str] | None = None,
+    max_implied_fee_rate: float = 0.05,
 ) -> tuple[list[Observation], dict[tuple[str, str, str, str], int]]:
     kept: list[Observation] = []
     rejected: dict[tuple[str, str, str, str], int] = defaultdict(int)
@@ -1679,6 +1718,7 @@ def filter_observations_with_quality_audit(
             min_tvl_usd=min_tvl_usd,
             max_hourly_yield_pct=max_hourly_yield_pct,
             v2_spike_sources=v2_spike_sources,
+            max_implied_fee_rate=max_implied_fee_rate,
         )
         if reason is None:
             kept.append(obs)
@@ -3902,9 +3942,11 @@ def compute_source_health_rows(
     tvl_alias_sanity_counts: dict[tuple[str, str, str], int] | None,
     max_fees_with_nonpositive_tvl_rate: float,
     max_invalid_fee_tier_rate: float,
+    max_implied_fee_anomaly_rate: float,
 ) -> list[SourceHealthRow]:
     max_rate = max(0.0, max_fees_with_nonpositive_tvl_rate)
     max_invalid_rate = max(0.0, max_invalid_fee_tier_rate)
+    max_implied_rate = max(0.0, max_implied_fee_anomaly_rate)
     tvl_alias_sanity_counts = tvl_alias_sanity_counts or {}
     rows: list[SourceHealthRow] = []
     for key, input_rows in sorted(source_input_counts.items()):
@@ -3912,15 +3954,23 @@ def compute_source_health_rows(
         fees_nonpos = tvl_alias_sanity_counts.get(key, 0)
         tvl_below_floor = rejected_counts.get((source_name, version, chain, "tvl_below_floor"), 0)
         invalid_fee_tier = rejected_counts.get((source_name, version, chain, "invalid_fee_tier"), 0)
+        implied_fee_anomaly = sum(
+            count
+            for (s, v, c, reason), count in rejected_counts.items()
+            if s == source_name and v == version and c == chain and reason.startswith("implied_fee_rate_gt")
+        )
         denom = float(input_rows) if input_rows > 0 else 1.0
         nonpos_rate = fees_nonpos / denom
         tvl_floor_rate = tvl_below_floor / denom
         invalid_fee_rate = invalid_fee_tier / denom
+        implied_fee_rate = implied_fee_anomaly / denom
         reasons: list[str] = []
         if nonpos_rate > max_rate:
             reasons.append(f"fees_with_nonpositive_tvl_rate {nonpos_rate:.4f} > {max_rate:.4f}")
         if invalid_fee_rate > max_invalid_rate:
             reasons.append(f"invalid_fee_tier_rate {invalid_fee_rate:.4f} > {max_invalid_rate:.4f}")
+        if implied_fee_rate > max_implied_rate:
+            reasons.append(f"implied_fee_anomaly_rate {implied_fee_rate:.4f} > {max_implied_rate:.4f}")
         excluded = bool(reasons)
         reason = "; ".join(reasons)
         rows.append(
@@ -3935,6 +3985,8 @@ def compute_source_health_rows(
                 tvl_below_floor_rate=tvl_floor_rate,
                 invalid_fee_tier_count=invalid_fee_tier,
                 invalid_fee_tier_rate=invalid_fee_rate,
+                implied_fee_anomaly_count=implied_fee_anomaly,
+                implied_fee_anomaly_rate=implied_fee_rate,
                 excluded_from_schedule=excluded,
                 exclusion_reason=reason,
             )
@@ -3958,6 +4010,8 @@ def write_source_health_csv(path: Path, rows: Iterable[SourceHealthRow]) -> None
                 "tvl_below_floor_rate",
                 "invalid_fee_tier_count",
                 "invalid_fee_tier_rate",
+                "implied_fee_anomaly_count",
+                "implied_fee_anomaly_rate",
                 "excluded_from_schedule",
                 "exclusion_reason",
             ]
@@ -3975,6 +4029,8 @@ def write_source_health_csv(path: Path, rows: Iterable[SourceHealthRow]) -> None
                     f"{row.tvl_below_floor_rate:.8f}",
                     row.invalid_fee_tier_count,
                     f"{row.invalid_fee_tier_rate:.8f}",
+                    row.implied_fee_anomaly_count,
+                    f"{row.implied_fee_anomaly_rate:.8f}",
                     ("true" if row.excluded_from_schedule else "false"),
                     row.exclusion_reason,
                 ]
@@ -4302,6 +4358,74 @@ def build_liquidity_schedule(
         )
     )
     return recommendations
+
+
+def build_liquidity_schedule_with_relaxation(
+    *,
+    rankings: list[PoolRanking],
+    observations: Iterable[Observation],
+    end_ts: int,
+    top_pools: int,
+    quantile: float,
+    min_usd_per_1000_hour: float | None,
+    base_min_hit_rate: float,
+    base_min_occurrences: int,
+    max_blocks_per_pool: int,
+    min_observed_days: float,
+    min_block_target: int,
+    enable_relaxation: bool,
+) -> tuple[list[ScheduleRecommendation], str]:
+    eligible_rankings = [r for r in rankings if r.observed_days >= max(0.0, min_observed_days)]
+    if not eligible_rankings:
+        eligible_rankings = rankings
+    min_hit = max(0.0, min(1.0, base_min_hit_rate))
+    min_occ = max(1, int(base_min_occurrences))
+    target = max(1, int(min_block_target))
+    attempts: list[tuple[float, int, str]] = [(min_hit, min_occ, "base")]
+    if enable_relaxation:
+        attempts.extend(
+            [
+                (max(0.50, min_hit - 0.10), min_occ, "relax_hit_0.10"),
+                (max(0.40, min_hit - 0.20), min_occ, "relax_hit_0.20"),
+                (max(0.40, min_hit - 0.20), max(2, min_occ - 1), "relax_hit_occ"),
+                (max(0.35, min_hit - 0.25), 2, "relax_floor"),
+            ]
+        )
+
+    dedup_attempts: list[tuple[float, int, str]] = []
+    seen: set[tuple[float, int]] = set()
+    for h, o, label in attempts:
+        key = (round(h, 6), int(o))
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup_attempts.append((h, o, label))
+
+    best_rows: list[ScheduleRecommendation] = []
+    trace_parts: list[str] = []
+    for hit_rate, occurrences, label in dedup_attempts:
+        rows = build_liquidity_schedule(
+            rankings=eligible_rankings,
+            observations=observations,
+            end_ts=end_ts,
+            top_pools=top_pools,
+            quantile=quantile,
+            min_usd_per_1000_hour=min_usd_per_1000_hour,
+            min_hit_rate=hit_rate,
+            min_occurrences=occurrences,
+            max_blocks_per_pool=max_blocks_per_pool,
+        )
+        trace_parts.append(f"{label}({hit_rate:.2f}/{occurrences})={len(rows)}")
+        if len(rows) > len(best_rows):
+            best_rows = rows
+        if len(rows) >= target:
+            best_rows = rows
+            break
+
+    trace = " -> ".join(trace_parts)
+    if min_observed_days > 0:
+        trace = f"min_observed_days>={min_observed_days:.1f}; " + trace
+    return best_rows, trace
 
 
 def build_llama_schedule_from_rankings(
@@ -5799,7 +5923,10 @@ def write_dashboard_state_json(
     chart_assets: dict[str, dict[str, str]] | None,
     selected_plan_context: str = "active",
     selected_plan_context_scenario: str = "",
-) -> None:
+    schedule_fallback_trace: str = "",
+    schedule_min_observed_days: float = 0.0,
+    max_implied_fee_rate: float = 0.05,
+) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     chart_assets = chart_assets or {}
     chart_by_pool = chart_assets
@@ -5920,6 +6047,9 @@ def write_dashboard_state_json(
             "move_cost_usd": default_move_cost_usd,
             "deploy_usd": default_deploy_usd,
             "max_moves_per_day": default_max_moves_per_day,
+            "schedule_fallback_trace": schedule_fallback_trace,
+            "schedule_min_observed_days": schedule_min_observed_days,
+            "max_implied_fee_rate": max_implied_fee_rate,
             "scenario_plan_filename": scenario_plan_filename,
             "selected_plan_context": selected_plan_context,
             "selected_plan_context_scenario": selected_plan_context_scenario,
@@ -6028,6 +6158,7 @@ def write_dashboard_state_json(
                 "fees_with_nonpositive_tvl_rate": row.fees_with_nonpositive_tvl_rate,
                 "tvl_below_floor_rate": row.tvl_below_floor_rate,
                 "invalid_fee_tier_rate": row.invalid_fee_tier_rate,
+                "implied_fee_anomaly_rate": row.implied_fee_anomaly_rate,
                 "excluded_from_schedule": row.excluded_from_schedule,
                 "exclusion_reason": row.exclusion_reason,
             }
@@ -6752,6 +6883,10 @@ def write_report_html(
     source_health_rows: list[SourceHealthRow] | None = None,
     chart_assets: dict[str, dict[str, str]] | None = None,
     scenario_plan_filename: str = "selected_plan_default.csv",
+    schedule_fallback_trace: str = "",
+    schedule_min_observed_days: float = 0.0,
+    max_implied_fee_rate: float = 0.05,
+    quality_reason_totals: dict[str, int] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     schedule_enhanced = schedule_enhanced or []
@@ -6761,6 +6896,7 @@ def write_report_html(
     selected_plan_rows = selected_plan_rows or []
     source_health_rows = source_health_rows or []
     chart_assets = chart_assets or {}
+    quality_reason_totals = quality_reason_totals or {}
     top_rankings = rankings[:top_n]
     top_schedules = schedules[:top_n]
     top_schedule_enhanced = schedule_enhanced[:top_n]
@@ -7024,6 +7160,31 @@ def write_report_html(
             f"Confidence p50/p75/p90 = {schedule_summary_stats.confidence_p50:.3f}/"
             f"{schedule_summary_stats.confidence_p75:.3f}/{schedule_summary_stats.confidence_p90:.3f}."
         )
+    schedule_capacity_note = ""
+    if schedule_enhanced:
+        max_dep = [max(0.0, row.max_deployable_usd_est) for row in schedule_enhanced]
+        clipped = sum(1 for value in max_dep if value < default_deploy_usd)
+        schedule_capacity_note = (
+            f"Capacity bottleneck: max deployable USD p50=${percentile(max_dep, 0.50):,.2f}, "
+            f"p90=${percentile(max_dep, 0.90):,.2f}, max=${max(max_dep):,.2f}. "
+            f"{clipped}/{len(max_dep)} blocks are clipped below requested deploy (${default_deploy_usd:,.0f})."
+        )
+    quality_implied_count = sum(
+        count
+        for reason, count in quality_reason_totals.items()
+        if reason.startswith("implied_fee_rate_gt")
+    )
+    quality_invalid_fee_count = int(quality_reason_totals.get("invalid_fee_tier", 0))
+    quality_tvl_nonpositive_count = int(
+        quality_reason_totals.get("fees_with_nonpositive_tvl", 0)
+        + quality_reason_totals.get("fees_with_zero_tvl", 0)
+        + quality_reason_totals.get("fees_with_missing_tvl", 0)
+    )
+    quality_anomaly_note = (
+        f"Data-quality anomalies: implied_fee_rate rejects={quality_implied_count:,} "
+        f"(cap={max_implied_fee_rate:.2%}), invalid_fee_tier rejects={quality_invalid_fee_count:,}, "
+        f"fees_with_nonpositive_tvl rejects={quality_tvl_nonpositive_count:,}."
+    )
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
         "<tr><td colspan='13'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
@@ -7307,7 +7468,7 @@ def write_report_html(
           <thead>
             <tr>
               <th>Source</th><th>Version</th><th>Chain</th><th>Input Rows</th><th>fees_with_nonpositive_tvl_rate</th>
-              <th>tvl_below_floor_rate</th><th>invalid_fee_tier_rate</th><th>Excluded</th><th>Reason</th>
+              <th>tvl_below_floor_rate</th><th>invalid_fee_tier_rate</th><th>implied_fee_anomaly_rate</th><th>Excluded</th><th>Reason</th>
             </tr>
           </thead>
           <tbody>
@@ -7315,14 +7476,15 @@ def write_report_html(
               "<tr>"
               f"<td>{html.escape(r.source_name)}</td><td>{html.escape(r.version)}</td><td>{html.escape(r.chain)}</td>"
               f"<td>{r.input_rows}</td><td>{r.fees_with_nonpositive_tvl_rate:.4%}</td>"
-              f"<td>{r.tvl_below_floor_rate:.4%}</td><td>{r.invalid_fee_tier_rate:.4%}</td>"
+              f"<td>{r.tvl_below_floor_rate:.4%}</td><td>{r.invalid_fee_tier_rate:.4%}</td><td>{r.implied_fee_anomaly_rate:.4%}</td>"
               f"<td>{'yes' if r.excluded_from_schedule else 'no'}</td><td>{html.escape(r.exclusion_reason)}</td>"
               "</tr>"
               for r in source_health_rows
-            ]) if source_health_rows else "<tr><td colspan='9'>No source health rows.</td></tr>"}
+            ]) if source_health_rows else "<tr><td colspan='10'>No source health rows.</td></tr>"}
           </tbody>
         </table>
       </div>
+      <p class="note">{html.escape(quality_anomaly_note)}</p>
     </section>
 
     <section class="card">
@@ -7330,6 +7492,12 @@ def write_report_html(
       <p class="note">
         Scenario: objective={html.escape(optimizer_objective)}, deploy=${default_deploy_usd:,.0f}, move cost=${default_move_cost_usd:.2f}/move,
         max_moves/day={default_max_moves_per_day}. Export file: <code>{html.escape(scenario_plan_filename)}</code>.
+      </p>
+      <p class="note">
+        Schedule build trace: {html.escape(schedule_fallback_trace or 'n/a')}. Minimum observed pool history for schedule eligibility: {schedule_min_observed_days:.1f} days.
+      </p>
+      <p class="note">
+        {html.escape(schedule_capacity_note or 'Capacity summary unavailable (no schedule_enhanced rows).')}
       </p>
       <div class="table-wrap">
         <table>
@@ -7803,6 +7971,7 @@ def main() -> int:
         min_tvl_usd=args.min_tvl_usd,
         max_hourly_yield_pct=args.max_hourly_yield_pct,
         v2_spike_sources=v2_spike_sources,
+        max_implied_fee_rate=args.max_implied_fee_rate,
     )
     quality_output_rows = len(observations)
     quality_rejected_rows = quality_input_rows - quality_output_rows
@@ -7814,12 +7983,16 @@ def main() -> int:
             ),
             file=sys.stderr,
         )
+    quality_reason_totals: dict[str, int] = defaultdict(int)
+    for (_src, _ver, _chain, reason), count in quality_rejected_counts.items():
+        quality_reason_totals[reason] += count
     source_health_rows = compute_source_health_rows(
         source_input_counts=source_input_counts,
         rejected_counts=quality_rejected_counts,
         tvl_alias_sanity_counts=tvl_alias_sanity_counts,
         max_fees_with_nonpositive_tvl_rate=args.max_fees_with_nonpositive_tvl_rate,
         max_invalid_fee_tier_rate=args.max_invalid_fee_tier_rate,
+        max_implied_fee_anomaly_rate=args.max_implied_fee_anomaly_rate,
     )
     excluded_schedule_sources = {
         (row.source_name, row.version, row.chain)
@@ -8020,17 +8193,21 @@ def main() -> int:
         index_window_clamped=llama_index_window_clamped,
         fetch_diag=llama_fetch_diag,
     )
-    schedules_all = build_liquidity_schedule(
+    schedules_all, schedule_fallback_trace = build_liquidity_schedule_with_relaxation(
         rankings=rankings,
         observations=observations,
         end_ts=end_ts,
         top_pools=args.schedule_top_pools,
         quantile=args.schedule_quantile,
         min_usd_per_1000_hour=args.schedule_min_usd_per_1000_hour,
-        min_hit_rate=args.schedule_min_hit_rate,
-        min_occurrences=args.schedule_min_occurrences,
+        base_min_hit_rate=args.schedule_min_hit_rate,
+        base_min_occurrences=args.schedule_min_occurrences,
         max_blocks_per_pool=args.schedule_max_blocks_per_pool,
+        min_observed_days=args.schedule_min_observed_days,
+        min_block_target=args.schedule_min_block_target,
+        enable_relaxation=(not args.disable_schedule_relaxation),
     )
+    print(f"Schedule fallback trace: {schedule_fallback_trace}", file=sys.stderr)
     if args.llama_schedule_mode != "off":
         llama_schedules = build_llama_schedule_from_rankings(
             llama_rows=llama_rankings,
@@ -8303,6 +8480,9 @@ def main() -> int:
         chart_assets=chart_assets,
         selected_plan_context=selected_plan_context,
         selected_plan_context_scenario=selected_plan_context_scenario,
+        schedule_fallback_trace=schedule_fallback_trace,
+        schedule_min_observed_days=args.schedule_min_observed_days,
+        max_implied_fee_rate=args.max_implied_fee_rate,
     )
     write_dashboard_html(dashboard_html, dashboard_state)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
@@ -8367,6 +8547,10 @@ def main() -> int:
         source_health_rows=source_health_rows,
         chart_assets=chart_assets,
         scenario_plan_filename=scenario_plan_csv.name,
+        schedule_fallback_trace=schedule_fallback_trace,
+        schedule_min_observed_days=args.schedule_min_observed_days,
+        max_implied_fee_rate=args.max_implied_fee_rate,
+        quality_reason_totals=dict(quality_reason_totals),
     )
 
     print_top(rankings, args.top)

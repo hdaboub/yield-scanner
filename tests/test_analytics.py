@@ -1432,6 +1432,76 @@ class AnalyticsTests(unittest.TestCase):
             1,
         )
 
+    def test_quality_filter_respects_custom_implied_fee_rate_cap(self) -> None:
+        rows = [
+            Observation(
+                source_name="uniswap-v3-mainnet-official",
+                version="v3",
+                chain="ethereum",
+                pool_id="pool-1",
+                pair="ETH/USDC",
+                fee_tier=3000,
+                ts=1700000000,
+                volume_usd=1000.0,
+                tvl_usd=50000.0,
+                fees_usd=60.0,  # 6% implied fee rate
+                hourly_yield=0.0012,
+            )
+        ]
+        filtered, rejected = scanner.filter_observations_with_quality_audit(
+            observations=rows,
+            min_tvl_usd=0.0,
+            max_hourly_yield_pct=None,
+            v2_spike_sources=set(),
+            max_implied_fee_rate=0.05,
+        )
+        self.assertEqual(len(filtered), 0)
+        self.assertEqual(
+            rejected.get(("uniswap-v3-mainnet-official", "v3", "ethereum", "implied_fee_rate_gt_cap")),
+            1,
+        )
+
+    def test_schedule_relaxation_fallback_increases_coverage(self) -> None:
+        start = int(dt.datetime(2026, 1, 1, 0, 0, tzinfo=dt.timezone.utc).timestamp())
+        rows: list[Observation] = []
+        for day in range(28):
+            for hour in [10]:
+                ts = start + (day * 24 + hour) * 3600
+                # About half of weekly-hour occurrences exceed fixed threshold.
+                y = 0.002 if (day % 4 in {0, 1}) else 0.0002
+                rows.append(
+                    Observation(
+                        source_name="s1",
+                        version="v3",
+                        chain="ethereum",
+                        pool_id="pool-schedule",
+                        pair="AAA/BBB",
+                        fee_tier=3000,
+                        ts=ts,
+                        volume_usd=10000.0,
+                        tvl_usd=1_000_000.0,
+                        fees_usd=y * 1_000_000.0,
+                        hourly_yield=y,
+                    )
+                )
+        rankings = rank_pools(rows, min_samples=4)
+        schedules, trace = scanner.build_liquidity_schedule_with_relaxation(
+            rankings=rankings,
+            observations=rows,
+            end_ts=start + 28 * 24 * 3600,
+            top_pools=1,
+            quantile=0.75,
+            min_usd_per_1000_hour=1.0,
+            base_min_hit_rate=0.60,
+            base_min_occurrences=2,
+            max_blocks_per_pool=3,
+            min_observed_days=0.0,
+            min_block_target=1,
+            enable_relaxation=True,
+        )
+        self.assertTrue(schedules)
+        self.assertIn("relax_hit_0.10", trace)
+
     def test_llama_pair_hour_query_uses_hourly_alias(self) -> None:
         self.assertIn("hourly: pairHourDatas", scanner.V2_PAIR_HOUR_QUERY)
 

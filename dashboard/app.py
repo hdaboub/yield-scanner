@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+import zipfile
 
 import pandas as pd
 import plotly.express as px
@@ -20,7 +23,18 @@ DEFAULT_ARTIFACTS = Path("output_from_droplet/multichain_3w")
 def _artifacts_dir() -> Path:
     raw = os.getenv("YIELD_SCANNER_ARTIFACTS", "").strip()
     if raw:
-        return Path(raw).expanduser().resolve()
+        candidate = Path(raw).expanduser().resolve()
+        if candidate.is_file() and candidate.suffix.lower() == ".zip":
+            stamp = f"{candidate.stem}_{int(candidate.stat().st_mtime)}_{candidate.stat().st_size}"
+            extract_root = Path(tempfile.gettempdir()) / "yield_scanner_artifacts" / stamp
+            if not (extract_root / "dashboard_state.json").exists():
+                if extract_root.exists():
+                    shutil.rmtree(extract_root, ignore_errors=True)
+                extract_root.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(candidate) as zf:
+                    zf.extractall(extract_root)
+            return extract_root
+        return candidate
     return DEFAULT_ARTIFACTS.resolve()
 
 

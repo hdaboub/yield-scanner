@@ -15,6 +15,12 @@ Optional artifact path override:
 YIELD_SCANNER_ARTIFACTS=output_from_droplet/multichain_3w streamlit run dashboard/app.py
 ```
 
+You can also point to a packaged zip bundle; it will auto-extract to a temp directory:
+
+```bash
+YIELD_SCANNER_ARTIFACTS=artifacts.zip streamlit run dashboard/app.py
+```
+
 Default artifacts path:
 
 - `output_from_droplet/multichain_3w`
