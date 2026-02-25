@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from collections import defaultdict
+from unittest.mock import patch
 
 import scanner
 from scanner import Observation, SourceConfig, normalize_row, rank_pools, resolve_endpoint
@@ -158,6 +159,50 @@ class AnalyticsTests(unittest.TestCase):
         self.assertTrue(ranked)
         self.assertEqual(thresholds.min_swap_count, 5)
         self.assertAlmostEqual(thresholds.min_weth_liquidity, 25.0)
+
+    def test_build_llama_schedule_from_rankings_produces_blocks(self) -> None:
+        base = int(dt.datetime(2026, 2, 1, 0, 0, tzinfo=dt.timezone.utc).timestamp())
+        rows: list[scanner.LlamaSpikeRankingRow] = []
+        for w in range(3):
+            ts = base + (w * 7 * 24 + 12) * 3600  # recurring Monday 12:00 UTC bucket
+            rows.append(
+                scanner.LlamaSpikeRankingRow(
+                    source_name="sushi-v2-fee-spikes-mainnet",
+                    chain="ethereum",
+                    hour_start_unix=ts,
+                    hour_start_utc=scanner.iso_hour(ts),
+                    hour_start_chicago=scanner.iso_hour_chicago(ts),
+                    pair="0xpair",
+                    token0="0xweth",
+                    token1="0xtok",
+                    token0_symbol="WETH",
+                    token1_symbol="TOK",
+                    swap_count=15,
+                    weth_reserve=100.0,
+                    weth_fee=0.2,
+                    weth_reserve_normalized=100.0,
+                    weth_fee_normalized=0.2,
+                    score=0.002,
+                    hourly_yield_pct=0.2,
+                    usd_per_1000_liquidity_hourly=2.0,
+                    rough_apr_pct=1752.0,
+                    baseline_median_score=0.0005,
+                    spike_multiplier=4.0,
+                    spike_multiplier_capped=4.0,
+                    persistence_hits=2,
+                    notes_flags="",
+                )
+            )
+        schedules = scanner.build_llama_schedule_from_rankings(
+            llama_rows=rows,
+            end_ts=base + 30 * 24 * 3600,
+            top_pairs=10,
+            min_occurrences=2,
+            min_hit_rate=0.5,
+            max_blocks_per_pool=3,
+        )
+        self.assertTrue(schedules)
+        self.assertEqual(schedules[0].source_name, "sushi-v2-fee-spikes-mainnet")
 
     def test_llama_diagnostics_messages_for_empty_cases(self) -> None:
         counts_a = scanner.LlamaDropoffCounters(
@@ -999,7 +1044,7 @@ class AnalyticsTests(unittest.TestCase):
     def test_dashboard_state_json_written(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir) / "dashboard_state.json"
-            scanner.write_dashboard_state_json(
+            state_obj = scanner.write_dashboard_state_json(
                 path=out,
                 generated_ts=int(dt.datetime(2026, 2, 25, 0, 0, tzinfo=dt.timezone.utc).timestamp()),
                 llama_diagnostics=None,
@@ -1021,6 +1066,12 @@ class AnalyticsTests(unittest.TestCase):
             state = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(state["defaults"]["objective"], "risk_adjusted")
             self.assertEqual(state["defaults"]["max_moves_per_day"], 4)
+            html_out = Path(tmpdir) / "dashboard.html"
+            scanner.write_dashboard_html(html_out, state_obj)
+            self.assertTrue(html_out.exists())
+            html_text = html_out.read_text(encoding="utf-8")
+            self.assertIn("Yield Scanner Dashboard", html_text)
+            self.assertIn("Live Spikes Heatmap", html_text)
 
     def test_confidence_distribution_non_constant(self) -> None:
         rows = [
@@ -1383,6 +1434,44 @@ class AnalyticsTests(unittest.TestCase):
 
     def test_llama_pair_hour_query_uses_hourly_alias(self) -> None:
         self.assertIn("hourly: pairHourDatas", scanner.V2_PAIR_HOUR_QUERY)
+
+    def test_v2_spike_fetch_accepts_hourly_alias(self) -> None:
+        source = SourceConfig(
+            name="sushi-v2-fee-spikes-mainnet",
+            version="v2",
+            chain="ethereum",
+            endpoint="https://example.invalid",
+            hourly_query="",
+            source_type="v2_spike",
+        )
+        row = {
+            "id": "hour-row-1",
+            "hourStartUnix": 1_700_000_000,
+            "fee0": "1.0",
+            "fee1": "0",
+            "reserve0": "100.0",
+            "reserve1": "200.0",
+            "swapCount": "20",
+            "pair": {"id": "0xpair"},
+        }
+        with patch("scanner.graphql_query", return_value={"hourly": [row]}), patch(
+            "scanner._fetch_v2_pair_metadata",
+            return_value={"0xpair": (source.weth_address.lower(), "0xtoken")},
+        ):
+            obs = scanner.fetch_v2_spike_observations(
+                source=source,
+                start_ts=1_699_999_000,
+                end_ts=1_700_001_000,
+                page_size=1000,
+                max_pages=1,
+                timeout=30,
+                retries=1,
+                min_swap_count=1,
+                min_reserve_weth=10.0,
+            )
+        self.assertEqual(len(obs), 1)
+        self.assertEqual(obs[0].pool_id, "0xpair")
+        self.assertEqual(obs[0].source_name, "sushi-v2-fee-spikes-mainnet")
 
     def test_build_liquidity_schedule_finds_reliable_recurring_block(self) -> None:
         start = int(dt.datetime(2025, 1, 6, 0, 0, tzinfo=dt.timezone.utc).timestamp())

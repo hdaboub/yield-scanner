@@ -678,6 +678,33 @@ def parse_args() -> argparse.Namespace:
         help="Maximum recommended add/remove blocks per pool (default: 3).",
     )
     parser.add_argument(
+        "--llama-schedule-mode",
+        choices=["off", "merge", "llama_only"],
+        default="off",
+        help=(
+            "Generate recurring schedule blocks from llama spike rankings: off (default), "
+            "merge with standard schedules, or llama_only."
+        ),
+    )
+    parser.add_argument(
+        "--llama-schedule-top-pairs",
+        type=int,
+        default=25,
+        help="Top llama pairs to consider for llama-derived schedule generation (default: 25).",
+    )
+    parser.add_argument(
+        "--llama-schedule-min-occurrences",
+        type=int,
+        default=2,
+        help="Minimum recurring occurrences per weekly bucket for llama-derived schedules (default: 2).",
+    )
+    parser.add_argument(
+        "--llama-schedule-min-hit-rate",
+        type=float,
+        default=0.50,
+        help="Minimum hit rate per weekly bucket for llama-derived schedules (default: 0.50).",
+    )
+    parser.add_argument(
         "--no-open-report",
         action="store_true",
         help="Do not auto-open the generated HTML report in the default browser.",
@@ -2561,10 +2588,12 @@ def fetch_v2_spike_observations(
             timeout=timeout,
             retries=retries,
         )
-        rows = data.get("pairHourDatas")
+        rows = data.get("hourly")
+        if rows is None:
+            rows = data.get("pairHourDatas")
         if not isinstance(rows, list):
             raise RuntimeError(
-                f"{source.name}: Expected 'pairHourDatas' list in v2 spike query response."
+                f"{source.name}: Expected 'hourly' (or 'pairHourDatas') list in v2 spike query response."
             )
         if not rows:
             break
@@ -4275,6 +4304,116 @@ def build_liquidity_schedule(
     return recommendations
 
 
+def build_llama_schedule_from_rankings(
+    llama_rows: list[LlamaSpikeRankingRow],
+    end_ts: int,
+    *,
+    top_pairs: int,
+    min_occurrences: int,
+    min_hit_rate: float,
+    max_blocks_per_pool: int,
+) -> list[ScheduleRecommendation]:
+    if not llama_rows:
+        return []
+    min_occ = max(1, int(min_occurrences))
+    hit_floor = max(0.0, min(1.0, float(min_hit_rate)))
+    max_blocks = max(1, int(max_blocks_per_pool))
+
+    by_pair: dict[tuple[str, str, str], list[LlamaSpikeRankingRow]] = defaultdict(list)
+    for row in llama_rows:
+        by_pair[(row.source_name, row.chain, row.pair)].append(row)
+
+    pair_rankings: list[tuple[float, tuple[str, str, str]]] = []
+    for key, rows in by_pair.items():
+        values = [max(0.0, r.usd_per_1000_liquidity_hourly) for r in rows]
+        if not values:
+            continue
+        pair_rankings.append((percentile(values, 0.90), key))
+    pair_rankings.sort(reverse=True, key=lambda x: x[0])
+    selected_keys = [key for _score, key in pair_rankings[: max(1, top_pairs)]]
+    rank_map = {key: idx + 1 for idx, key in enumerate(selected_keys)}
+
+    out: list[ScheduleRecommendation] = []
+    for key in selected_keys:
+        source_name, chain, pair_id = key
+        rows = sorted(by_pair.get(key, []), key=lambda r: r.hour_start_unix)
+        if not rows:
+            continue
+        token0_symbol = rows[0].token0_symbol
+        token1_symbol = rows[0].token1_symbol
+        pair_label = human_pool_label(token0_symbol, token1_symbol, rows[0].token0, rows[0].token1)
+        values = [max(0.0, r.usd_per_1000_liquidity_hourly) for r in rows]
+        threshold_usd_per_1000 = percentile(values, 0.75)
+        threshold_yield_pct = (threshold_usd_per_1000 / 1000.0) * 100.0
+
+        bucket_all: dict[tuple[int, int], list[float]] = defaultdict(list)
+        bucket_spike: dict[tuple[int, int], list[float]] = defaultdict(list)
+        for r in rows:
+            dtu = dt.datetime.fromtimestamp(r.hour_start_unix, tz=dt.timezone.utc)
+            bucket = (dtu.weekday(), dtu.hour)
+            usd = max(0.0, r.usd_per_1000_liquidity_hourly)
+            bucket_all[bucket].append(usd)
+            if usd >= threshold_usd_per_1000 and r.persistence_hits >= 1:
+                bucket_spike[bucket].append(usd)
+
+        blocks_for_pair: list[ScheduleRecommendation] = []
+        for (weekday, hour), vals in bucket_spike.items():
+            total_vals = bucket_all.get((weekday, hour), [])
+            if len(vals) < min_occ or not total_vals:
+                continue
+            hit_rate = len(vals) / len(total_vals)
+            if hit_rate < hit_floor:
+                continue
+            next_add_ts = next_weekly_occurrence(end_ts, weekday, hour)
+            next_remove_ts = next_add_ts + SECONDS_PER_HOUR
+            avg_usd = statistics.fmean(vals)
+            p90_usd = percentile(vals, 0.90)
+            blocks_for_pair.append(
+                ScheduleRecommendation(
+                    pool_rank=rank_map[key],
+                    source_name=source_name,
+                    version="v2",
+                    chain=chain,
+                    pool_id=pair_id,
+                    pair=pair_label,
+                    fee_tier=3000,
+                    reliability_hit_rate_pct=hit_rate * 100.0,
+                    reliable_occurrences=len(vals),
+                    threshold_hourly_yield_pct=threshold_yield_pct,
+                    avg_block_hourly_yield_pct=(avg_usd / 1000.0) * 100.0,
+                    p90_block_hourly_yield_pct=(p90_usd / 1000.0) * 100.0,
+                    block_hours=1,
+                    add_day_utc=DAY_NAMES[weekday],
+                    add_hour_utc=hour,
+                    remove_day_utc=DAY_NAMES[(weekday + (1 if hour == 23 else 0)) % 7],
+                    remove_hour_utc=(hour + 1) % 24,
+                    add_pattern_utc=f"{DAY_NAMES[weekday]} {hour:02d}:00 UTC",
+                    remove_pattern_utc=f"{DAY_NAMES[(weekday + (1 if hour == 23 else 0)) % 7]} {(hour + 1) % 24:02d}:00 UTC",
+                    next_add_ts=next_add_ts,
+                    next_remove_ts=next_remove_ts,
+                    pool_score=percentile(values, 0.90) / 1000.0,
+                )
+            )
+        blocks_for_pair.sort(
+            key=lambda b: (
+                b.reliability_hit_rate_pct,
+                b.avg_block_hourly_yield_pct,
+                b.reliable_occurrences,
+            ),
+            reverse=True,
+        )
+        out.extend(blocks_for_pair[:max_blocks])
+
+    out.sort(
+        key=lambda b: (
+            b.pool_rank,
+            -b.reliability_hit_rate_pct,
+            -b.avg_block_hourly_yield_pct,
+        )
+    )
+    return out
+
+
 def _pool_key(
     source_name: str,
     version: str,
@@ -5897,6 +6036,283 @@ def write_dashboard_state_json(
         "charts": chart_assets,
     }
     path.write_text(json.dumps(state, indent=2, sort_keys=False), encoding="utf-8")
+    return state
+
+
+def write_dashboard_html(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state_json = json.dumps(state, separators=(",", ":"))
+    template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Yield Scanner Dashboard</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --line: #dbe4ef;
+      --ok: #0f766e;
+      --warn: #b45309;
+    }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--ink); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    h1,h2 { margin: 0 0 10px 0; }
+    .row { display: grid; gap: 12px; margin-bottom: 12px; }
+    .row.kpi { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+    .row.main { grid-template-columns: 1.5fr 1fr; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: hidden; }
+    .kpi { font-size: 12px; color: var(--muted); }
+    .kpi .v { display: block; font-size: 20px; color: var(--ink); font-weight: 700; margin-top: 2px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 6px 8px; text-align: left; white-space: nowrap; }
+    th { font-size: 12px; color: var(--muted); background: #f8fbff; position: sticky; top: 0; }
+    .scroll { max-height: 320px; overflow: auto; }
+    .ok { color: var(--ok); font-weight: 600; }
+    .warn { color: var(--warn); font-weight: 600; }
+    .pair { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .note { color: var(--muted); margin-top: 6px; }
+    img.chart { max-width: 100%; max-height: 180px; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; }
+    @media (max-width: 1100px) { .row.main { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Yield Scanner Dashboard</h1>
+  <div class="note" id="runMeta"></div>
+
+  <div class="row kpi">
+    <div class="panel kpi">Llama Ranked Spikes<span class="v" id="kpiSpikes">0</span></div>
+    <div class="panel kpi">Schedule Blocks<span class="v" id="kpiBlocks">0</span></div>
+    <div class="panel kpi">Selected Plan Moves<span class="v" id="kpiPlan">0</span></div>
+    <div class="panel kpi">Source Exclusions<span class="v" id="kpiExcluded">0</span></div>
+  </div>
+
+  <div class="row main">
+    <div class="panel">
+      <h2>Live Spikes Heatmap</h2>
+      <div id="spikeHeat" style="height: 320px;"></div>
+      <div class="note">Color = spike multiplier, hover to inspect pair/hour.</div>
+    </div>
+    <div class="panel">
+      <h2>Moves/Day Frontier</h2>
+      <div id="curvePlot" style="height: 320px;"></div>
+    </div>
+  </div>
+
+  <div class="row main">
+    <div class="panel">
+      <h2>Top Spikes</h2>
+      <div class="scroll"><table id="spikesTable"></table></div>
+    </div>
+    <div class="panel">
+      <h2>Active Plan</h2>
+      <div class="scroll"><table id="planTable"></table></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Pool Drilldown</h2>
+      <label for="poolSelect">Pool</label>
+      <select id="poolSelect"></select>
+      <div id="poolMeta" class="note"></div>
+      <div id="poolSpark" style="height: 280px;"></div>
+      <div id="poolCharts"></div>
+    </div>
+  </div>
+
+  <script>
+    const state = __STATE_JSON__;
+    const spikes = state.spikes || [];
+    const schedule = (state.schedule || {});
+    const topBlocks = schedule.top_blocks || [];
+    const selectedPlan = schedule.selected_plan || [];
+    const curve = schedule.curve || [];
+    const sourceHealth = state.source_health || [];
+
+    document.getElementById("runMeta").textContent =
+      `Generated: ${state.generated_utc || "n/a"} | Objective: ${(state.defaults||{}).objective || "n/a"} | Scenario: ${(state.defaults||{}).scenario_plan_filename || "n/a"}`;
+    document.getElementById("kpiSpikes").textContent = String(spikes.length);
+    document.getElementById("kpiBlocks").textContent = String(topBlocks.length);
+    document.getElementById("kpiPlan").textContent = String(selectedPlan.length);
+    document.getElementById("kpiExcluded").textContent = String(sourceHealth.filter(x => x.excluded_from_schedule).length);
+
+    function renderTable(el, cols, rows) {
+      el.innerHTML = "";
+      const thead = document.createElement("thead");
+      const htr = document.createElement("tr");
+      cols.forEach(c => {
+        const th = document.createElement("th");
+        th.textContent = c.label;
+        htr.appendChild(th);
+      });
+      thead.appendChild(htr);
+      el.appendChild(thead);
+      const tbody = document.createElement("tbody");
+      rows.forEach(r => {
+        const tr = document.createElement("tr");
+        cols.forEach(c => {
+          const td = document.createElement("td");
+          td.textContent = (r[c.key] ?? "").toString();
+          if (c.key === "pair") td.className = "pair";
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      el.appendChild(tbody);
+    }
+
+    renderTable(
+      document.getElementById("spikesTable"),
+      [
+        {key: "hour_start_cst", label: "Time (CST)"},
+        {key: "pair", label: "Pool"},
+        {key: "chain", label: "Chain"},
+        {key: "usd_per_1000_liquidity_hourly", label: "USD/$1k/hr"},
+        {key: "spike_multiplier", label: "Spike x"},
+        {key: "persistence_hits", label: "Hits"},
+      ],
+      spikes.slice(0, 100),
+    );
+    renderTable(
+      document.getElementById("planTable"),
+      [
+        {key: "next_add_cst", label: "Add (CST)"},
+        {key: "next_remove_cst", label: "Remove (CST)"},
+        {key: "pair", label: "Pool"},
+        {key: "chain", label: "Chain"},
+        {key: "effective_deploy_usd", label: "Effective Deploy"},
+        {key: "expected_net_usd", label: "Expected Net USD"},
+      ],
+      selectedPlan,
+    );
+
+    const heatX = spikes.map(r => r.hour_start_cst || "");
+    const heatY = spikes.map(r => r.pair || "");
+    const heatZ = spikes.map(r => Number(r.spike_multiplier || 0));
+    Plotly.newPlot("spikeHeat", [{
+      type: "heatmap",
+      x: heatX,
+      y: heatY,
+      z: [heatZ],
+      colorscale: "YlOrRd",
+      showscale: true,
+    }], {margin: {l: 120, r: 10, t: 20, b: 90}, xaxis: {tickangle: -35}});
+
+    const curveGroups = {};
+    curve.forEach(r => {
+      const k = `$${Number(r.move_cost_usd_per_move || 0).toFixed(0)}`;
+      curveGroups[k] = curveGroups[k] || {x: [], y: []};
+      curveGroups[k].x.push(Number(r.max_moves_per_day || 0));
+      curveGroups[k].y.push(Number(r.total_net_usd || 0));
+    });
+    const curveData = Object.entries(curveGroups).map(([name, v]) => ({
+      type: "scatter",
+      mode: "lines+markers",
+      name,
+      x: v.x,
+      y: v.y,
+    }));
+    Plotly.newPlot("curvePlot", curveData, {
+      margin: {l: 55, r: 10, t: 20, b: 40},
+      xaxis: {title: "Max moves/day"},
+      yaxis: {title: "Total net USD"},
+    });
+
+    const poolMap = new Map();
+    [...spikes, ...topBlocks, ...selectedPlan].forEach(r => {
+      const id = r.pair || r.pool_id;
+      if (!id || poolMap.has(id)) return;
+      poolMap.set(id, r);
+    });
+    const select = document.getElementById("poolSelect");
+    [...poolMap.keys()].sort().forEach(id => {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = id;
+      select.appendChild(opt);
+    });
+
+    function renderPool() {
+      const id = select.value;
+      const row = poolMap.get(id) || {};
+      document.getElementById("poolMeta").textContent =
+        `Chain: ${row.chain || "n/a"} | Source: ${row.source_name || "n/a"} | Capacity: ${row.capacity_flag || "n/a"} | Confidence: ${row.confidence_score ?? "n/a"}`;
+      const pspikes = spikes.filter(s => s.pair === id);
+      Plotly.newPlot("poolSpark", [{
+        type: "scatter",
+        mode: "lines+markers",
+        x: pspikes.map(x => x.hour_start_cst),
+        y: pspikes.map(x => Number(x.usd_per_1000_liquidity_hourly || 0)),
+        name: "USD/$1k/hr",
+      }], {margin: {l: 55, r: 10, t: 20, b: 60}, xaxis: {tickangle: -30}});
+      const charts = row.charts || {};
+      const html = [];
+      if (charts.timeseries_png) html.push(`<a href="${charts.timeseries_png}" target="_blank" rel="noopener"><img class="chart" src="${charts.timeseries_png}" alt="timeseries"></a>`);
+      if (charts.heatmap_png) html.push(`<a href="${charts.heatmap_png}" target="_blank" rel="noopener"><img class="chart" src="${charts.heatmap_png}" alt="heatmap"></a>`);
+      document.getElementById("poolCharts").innerHTML = html.join("");
+    }
+
+    if (select.options.length > 0) {
+      select.addEventListener("change", renderPool);
+      renderPool();
+    }
+  </script>
+</body>
+</html>
+"""
+    path.write_text(template.replace("__STATE_JSON__", state_json), encoding="utf-8")
+
+
+def git_commit_hash() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def write_run_manifest_json(
+    path: Path,
+    *,
+    args: argparse.Namespace,
+    config_path: Path,
+    generated_ts: int,
+    start_ts: int,
+    end_ts: int,
+    sources: list[SourceConfig],
+    output_dir: Path,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "generated_utc": iso_hour(generated_ts),
+        "generated_cst": format_ts_cst(generated_ts),
+        "git_commit": git_commit_hash(),
+        "config_path": str(config_path),
+        "output_dir": str(output_dir),
+        "analysis_window_start_utc": iso_hour(start_ts),
+        "analysis_window_end_utc": iso_hour(end_ts),
+        "argv": sys.argv,
+        "args": vars(args),
+        "sources": [
+            {
+                "name": s.name,
+                "version": s.version,
+                "chain": s.chain,
+                "endpoint": s.endpoint,
+                "source_type": s.source_type,
+            }
+            for s in sources
+        ],
+    }
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=False), encoding="utf-8")
 
 
 def write_schedule_md(
@@ -6872,6 +7288,8 @@ def write_report_html(
         <a href="selected_plan_active.csv">selected_plan_active.csv</a>
         <a href="{html.escape(scenario_plan_filename)}">{html.escape(scenario_plan_filename)}</a>
         <a href="dashboard_state.json">dashboard_state.json</a>
+        <a href="dashboard.html">dashboard.html</a>
+        <a href="run_manifest.json">run_manifest.json</a>
         <a href="source_health.csv">source_health.csv</a>
         <a href="sushi_v2_yield_spikes.csv">sushi_v2_yield_spikes.csv</a>
         <a href="llama_pair_hour_data.csv">llama_pair_hour_data.csv</a>
@@ -7613,6 +8031,28 @@ def main() -> int:
         min_occurrences=args.schedule_min_occurrences,
         max_blocks_per_pool=args.schedule_max_blocks_per_pool,
     )
+    if args.llama_schedule_mode != "off":
+        llama_schedules = build_llama_schedule_from_rankings(
+            llama_rows=llama_rankings,
+            end_ts=end_ts,
+            top_pairs=args.llama_schedule_top_pairs,
+            min_occurrences=args.llama_schedule_min_occurrences,
+            min_hit_rate=args.llama_schedule_min_hit_rate,
+            max_blocks_per_pool=args.schedule_max_blocks_per_pool,
+        )
+        if args.llama_schedule_mode == "llama_only":
+            schedules_all = llama_schedules
+        else:
+            seen_keys = {
+                (s.source_name, s.version, s.chain, s.pool_id, s.add_day_utc, s.add_hour_utc, s.block_hours)
+                for s in schedules_all
+            }
+            for s in llama_schedules:
+                k = (s.source_name, s.version, s.chain, s.pool_id, s.add_day_utc, s.add_hour_utc, s.block_hours)
+                if k in seen_keys:
+                    continue
+                schedules_all.append(s)
+                seen_keys.add(k)
     schedules = [
         row
         for row in schedules_all
@@ -7796,8 +8236,10 @@ def main() -> int:
     schedule_run_diagnostics_csv = output_dir / "schedule_run_diagnostics.csv"
     selected_plan_default_csv = output_dir / "selected_plan_default.csv"
     selected_plan_active_csv = output_dir / "selected_plan_active.csv"
+    run_manifest_json = output_dir / "run_manifest.json"
     source_health_csv = output_dir / "source_health.csv"
     dashboard_state_json = output_dir / "dashboard_state.json"
+    dashboard_html = output_dir / "dashboard.html"
     schedule_md = output_dir / "liquidity_schedule.md"
     v2_spike_csv = output_dir / "sushi_v2_yield_spikes.csv"
     llama_pair_hour_csv = output_dir / "llama_pair_hour_data.csv"
@@ -7831,8 +8273,18 @@ def main() -> int:
     write_selected_plan_csv(selected_plan_default_csv, selected_plan_for_state)
     write_selected_plan_csv(selected_plan_active_csv, selected_plan_for_state)
     write_selected_plan_csv(scenario_plan_csv, selected_plan_for_state)
+    write_run_manifest_json(
+        run_manifest_json,
+        args=args,
+        config_path=config_path,
+        generated_ts=generated_now_ts,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        sources=sources,
+        output_dir=output_dir,
+    )
     write_source_health_csv(source_health_csv, source_health_rows)
-    write_dashboard_state_json(
+    dashboard_state = write_dashboard_state_json(
         path=dashboard_state_json,
         generated_ts=generated_now_ts,
         llama_diagnostics=llama_diagnostics,
@@ -7852,6 +8304,7 @@ def main() -> int:
         selected_plan_context=selected_plan_context,
         selected_plan_context_scenario=selected_plan_context_scenario,
     )
+    write_dashboard_html(dashboard_html, dashboard_state)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
     write_llama_pair_hour_csv(llama_pair_hour_csv, llama_pair_hour_rows)
     write_llama_spike_csv(llama_rankings_csv, llama_rankings, llama_thresholds)
@@ -7950,9 +8403,11 @@ def main() -> int:
     print(f"Wrote: {schedule_summary_stats_csv}", file=sys.stderr)
     print(f"Wrote: {selected_plan_default_csv}", file=sys.stderr)
     print(f"Wrote: {selected_plan_active_csv}", file=sys.stderr)
+    print(f"Wrote: {run_manifest_json}", file=sys.stderr)
     print(f"Wrote: {scenario_plan_csv}", file=sys.stderr)
     print(f"Wrote: {source_health_csv}", file=sys.stderr)
     print(f"Wrote: {dashboard_state_json}", file=sys.stderr)
+    print(f"Wrote: {dashboard_html}", file=sys.stderr)
     if args.charts_enable:
         print(f"Wrote charts: {charts_dir}", file=sys.stderr)
     print(f"Wrote: {schedule_md}", file=sys.stderr)

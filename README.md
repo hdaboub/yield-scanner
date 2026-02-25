@@ -9,10 +9,13 @@ CLI application to scan Uniswap v3 and v4 pool hourly data from GraphQL sources,
 - `summary.md`: top pools with best hour/day windows
 - `liquidity_schedule.csv`: recommended add/remove schedule blocks from reliable recurring high-yield windows
 - `liquidity_schedule.md`: human-readable schedule summary with next UTC add/remove times
+- `schedule_run_diagnostics.csv`: per-scenario filter dropoff counters and empty-stage reason
 - `sushi_v2_yield_spikes.csv`: ranked V2 hourly fee-yield spikes using `feeWETH / reserveWETH`
 - `llama_pair_hour_data.csv`: Llama PairHourData-derived rows used for spike analysis
 - `llama_weth_spike_rankings.csv`: ranked Llama WETH spike rows (`feeWETH/reserveWETH`)
 - `llama_run_diagnostics.csv`: llama runtime diagnostics (meta block, seeding state, window, filter dropoff counters)
+- `selected_plan_active.csv`: actual schedule rows used by report/dashboard (default scenario or fallback)
+- `run_manifest.json`: run metadata (git commit, args, endpoints, window)
 - `data_quality_audit.csv`: per-source reject counts and reasons from quality filters
 - `report.html`: consolidated interactive report (rankings + schedule)
 - Fee-time columns in rankings:
@@ -161,6 +164,13 @@ Llama spike ranking defaults (production):
   - default path: `50/10 -> 25/5 -> 10/3`
 - ranking priority: `spike_multiplier` (score vs baseline median) then raw `score`, with persistence gating
 
+Optional llama-driven schedule generation:
+
+- `--llama-schedule-mode off|merge|llama_only`
+- `--llama-schedule-top-pairs` (default `25`)
+- `--llama-schedule-min-occurrences` (default `2`)
+- `--llama-schedule-min-hit-rate` (default `0.50`)
+
 ## Schedule Logic
 
 The recommended schedule is built per pool from recurring weekly hour buckets:
@@ -219,6 +229,20 @@ Important: if `--schedule-min-occurrences` is `2`, you generally need at least 3
 - Use multiple sources to cover all chains and both protocol versions.
 - Set `UNISWAP_V4_ENDPOINT` (or your own env var names) if your endpoint is env-based.
 
+## Artifact Packaging
+
+Package a run output directory into `artifacts.zip`:
+
+```bash
+./scripts/package_artifacts.sh output/multichain_3w artifacts.zip
+```
+
+Unpack and validate a downloaded artifact bundle:
+
+```bash
+python3 scripts/unpack_latest_artifacts.py artifacts.zip --out-dir output/unpacked_latest
+```
+
 ## Interactive Dashboard (Streamlit)
 
 A lightweight artifacts-driven dashboard is available under `dashboard/`.
@@ -226,12 +250,27 @@ A lightweight artifacts-driven dashboard is available under `dashboard/`.
 ```bash
 pip install streamlit pandas plotly
 YIELD_SCANNER_ARTIFACTS=output_from_droplet/multichain_3w streamlit run dashboard/app.py
+# or
+YIELD_SCANNER_ARTIFACTS=output_from_droplet/multichain_3w streamlit run dashboard.py
+```
+
+Generate a static interactive `dashboard.html` directly from `dashboard_state.json`:
+
+```bash
+python3 scripts/generate_dashboard_html.py \
+  --state output/multichain_3w/dashboard_state.json \
+  --out output/multichain_3w/dashboard.html
 ```
 
 ## Llama Subgraph Source
 
 - Subgraph source is tracked in `subgraphs/llama/`.
 - Build/deploy notes are in `subgraphs/llama/README.md`.
+- Pull the latest subgraph from droplet:
+
+```bash
+./scripts/pull_llama_subgraph.sh 134.199.135.19
+```
 - Source endpoints can use shell-style env references such as `${UNISWAP_V4_ENDPOINT}`.
 - Source headers can also use env references (for example `Authorization: Bearer ${TOKEN}`).
 - By default, a failed source is skipped and the scan continues. Add `--strict-sources` to fail the full run on any source error.

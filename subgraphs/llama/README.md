@@ -1,83 +1,77 @@
-# Llama Subgraph (Ethereum Mainnet)
+# Llama Subgraph (The Graph Studio)
 
-This subgraph indexes Sushi/Uniswap-style activity on Ethereum mainnet and exposes V2 pair-hour fee/reserve primitives used by the yield scanner report.
+This directory tracks the deployed `llama` subgraph source pulled from the droplet (`/root/llama`).
 
-## Endpoint
+## Purpose
 
-- Studio GraphQL endpoint (current): `https://api.studio.thegraph.com/query/1742316/llama/v0.2.9`
+Indexes Ethereum Sushi/Uniswap-style activity for scanner/reporting:
 
-## What It Indexes
+- V2 pair-hour aggregates (`pairHourDatas`) for fee-yield spike detection
+- Pair and token metadata (`pairs`, `tokens`)
+- Runtime seeding state (`v2SeedStates`)
 
-- V2 factory + pair templates
-  - `PairHourData` (hourly aggregates)
-  - `Pair` / `Token` metadata
-  - raw `V2Swap` events
-- V3 factory + pool templates
-  - raw `V3Swap` events (no hourly rollup yet)
+Current Studio endpoint:
 
-## Key Entities Used by Scanner
+- `https://api.studio.thegraph.com/query/1742316/llama/v0.2.9`
 
-- `pairHourDatas`
-  - `pair`, `hourStartUnix`, `swapCount`, `fee0`, `fee1`, `reserve0`, `reserve1`
-- `pairs`
-  - `id`, `token0`, `token1`
-- `tokens` (best effort metadata)
-  - `id`, `symbol`, `name`, `decimals`
-- runtime health checks:
-  - `_meta { block { number } }`
-  - `v2SeedStates { nextIndex total lastBlock }`
-
-## Build and Deploy
+## Build
 
 ```bash
 yarn
 yarn codegen
 yarn build
+```
+
+## Deploy (Studio)
+
+```bash
 graph deploy llama -l v0.2.9
 ```
 
-Use a newer label when releasing an updated deployment.
+Use a new label (`v0.2.10`, etc.) when promoting changes.
 
-## Scanner Integration Notes
+## Runtime checks
 
-- The scanner treats this as a `source_type: v2_spike` source.
-- Llama hourly query responses must expose rows under top-level alias `hourly` for scanner compatibility.
-- Core ranking signal for WETH pairs:
-  - `score = feeWETH / reserveWETH`
-- Ranking uses:
-  - baseline median score,
-  - spike multiplier,
-  - persistence hits.
-
-## Example Queries
-
-Runtime health:
+Query indexing tip + seed progress:
 
 ```graphql
 {
   _meta { block { number } }
-  v2SeedStates(where: { id: "v2" }) { nextIndex total lastBlock }
+  v2SeedStates(where: { id: "v2" }) {
+    id
+    nextIndex
+    total
+    lastBlock
+  }
 }
 ```
 
-Pair-hour window:
+Query pair-hour rows (scanner expects alias `hourly`):
 
 ```graphql
-query PairHours($start: Int!, $end: Int!, $first: Int!, $afterId: String) {
+query PairHourPage($first: Int!, $start: Int!, $end: Int!) {
   hourly: pairHourDatas(
     first: $first
     orderBy: hourStartUnix
-    orderDirection: asc
-    where: { hourStartUnix_gte: $start, hourStartUnix_lte: $end, id_gt: $afterId }
+    orderDirection: desc
+    where: { hourStartUnix_gte: $start, hourStartUnix_lte: $end }
   ) {
     id
-    pair { id }
     hourStartUnix
     fee0
     fee1
     reserve0
     reserve1
     swapCount
+    pair { id }
   }
 }
+```
+
+## Sync helper
+
+To refresh this directory from droplet:
+
+```bash
+./scripts/pull_llama_subgraph.sh 134.199.135.19
 ```
