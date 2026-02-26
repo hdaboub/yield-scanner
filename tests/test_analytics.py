@@ -1502,6 +1502,43 @@ class AnalyticsTests(unittest.TestCase):
         self.assertTrue(schedules)
         self.assertIn("relax_hit_0.10", trace)
 
+    def test_persistent_source_quarantine_tracks_bad_run_streak(self) -> None:
+        row = scanner.SourceHealthRow(
+            source_name="bad-source",
+            version="v4",
+            chain="base",
+            input_rows=100,
+            fees_with_nonpositive_tvl_input_count=50,
+            fees_with_nonpositive_tvl_rate=0.50,
+            tvl_below_floor_count=10,
+            tvl_below_floor_rate=0.10,
+            invalid_fee_tier_count=5,
+            invalid_fee_tier_rate=0.05,
+            implied_fee_anomaly_count=8,
+            implied_fee_anomaly_rate=0.08,
+            bad_run_streak=0,
+            persistent_anomaly_excluded=False,
+            excluded_from_schedule=True,
+            exclusion_reason="fees_with_nonpositive_tvl_rate 0.5000 > 0.1000",
+        )
+        rows1, hist1 = scanner.apply_persistent_source_quarantine(
+            rows=[row],
+            history={},
+            persistent_runs=2,
+            now_ts=1_700_000_000,
+        )
+        self.assertEqual(rows1[0].bad_run_streak, 1)
+        self.assertFalse(rows1[0].persistent_anomaly_excluded)
+        rows2, _ = scanner.apply_persistent_source_quarantine(
+            rows=[row],
+            history=hist1,
+            persistent_runs=2,
+            now_ts=1_700_000_000 + 3600,
+        )
+        self.assertEqual(rows2[0].bad_run_streak, 2)
+        self.assertTrue(rows2[0].persistent_anomaly_excluded)
+        self.assertIn("persistent_anomaly_streak", rows2[0].exclusion_reason)
+
     def test_resolve_default_deploy_usd_auto_mode_uses_capacity_percentile(self) -> None:
         now = int(dt.datetime(2026, 2, 24, 12, 0, tzinfo=dt.timezone.utc).timestamp())
         rows = [

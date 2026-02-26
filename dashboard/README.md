@@ -25,10 +25,23 @@ Default artifacts path:
 
 - `output_from_droplet/multichain_3w`
 
+Optional remote-control environment variables (for one-click reruns + live service logs):
+
+- `YIELD_SCANNER_REMOTE_HOST` (example: `root@134.199.135.19`)
+- `YIELD_SCANNER_REMOTE_APP_DIR` (default: `/opt/uniswap-yield-scanner`)
+- `YIELD_SCANNER_REMOTE_SERVICE` (default: `uniswap-jobs.service`)
+- `YIELD_SCANNER_REMOTE_CONFIG` (default: `config/sources.uniswap-official.multichain.json`)
+- `YIELD_SCANNER_REMOTE_OUTPUT_DIR` (default: `output/multichain_3w`)
+
 ## What it shows
 
 - Llama spike leaderboard (sortable/filterable)
+- Compact excluded-source panel with quarantine reasons
 - Schedule blocks and active selected plan
 - Moves/day frontier table
-- Source health exclusions
+- Operator decision charts per top pool:
+  - line chart (USD/$1k/hr + TVL with schedule-window overlay)
+  - heatmap (hour-of-week median USD/$1k/hr)
+- One-click service restart and ad-hoc rerun controls (hours, move cost, deploy, workers, strict/relaxed)
+- Live service status + log tails
 - Pool-level drilldown with yield and swapCount time series

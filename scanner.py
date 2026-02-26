@@ -355,6 +355,8 @@ class SourceHealthRow:
     invalid_fee_tier_rate: float
     implied_fee_anomaly_count: int
     implied_fee_anomaly_rate: float
+    bad_run_streak: int
+    persistent_anomaly_excluded: bool
     excluded_from_schedule: bool
     exclusion_reason: str
 
@@ -1021,6 +1023,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.10,
         help="Exclude schedule sources if implied_fee_rate anomaly reject rate exceeds this value (default: 0.10).",
+    )
+    parser.add_argument(
+        "--source-health-history-file",
+        default="output/cache/source_health_history.json",
+        help="Path to source-health history JSON used for persistent anomaly quarantine (default: output/cache/source_health_history.json).",
+    )
+    parser.add_argument(
+        "--source-health-persistent-runs",
+        type=int,
+        default=3,
+        help="Auto-exclude sources with anomaly streaks at or above this many consecutive bad runs (default: 3).",
     )
     parser.add_argument(
         "--charts-enable",
@@ -4008,11 +4021,92 @@ def compute_source_health_rows(
                 invalid_fee_tier_rate=invalid_fee_rate,
                 implied_fee_anomaly_count=implied_fee_anomaly,
                 implied_fee_anomaly_rate=implied_fee_rate,
+                bad_run_streak=0,
+                persistent_anomaly_excluded=False,
                 excluded_from_schedule=excluded,
                 exclusion_reason=reason,
             )
         )
     return rows
+
+
+def load_source_health_history(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        out[key] = value
+    return out
+
+
+def apply_persistent_source_quarantine(
+    rows: list[SourceHealthRow],
+    history: dict[str, dict[str, Any]],
+    persistent_runs: int,
+    now_ts: int | None = None,
+) -> tuple[list[SourceHealthRow], dict[str, dict[str, Any]]]:
+    now_label = iso_hour(now_ts if now_ts is not None else int(time.time()))
+    min_runs = max(1, int(persistent_runs))
+    updated_history: dict[str, dict[str, Any]] = dict(history)
+    updated_rows: list[SourceHealthRow] = []
+    for row in rows:
+        key = f"{row.source_name}|{row.version}|{row.chain}"
+        prior = history.get(key, {})
+        prior_streak = int(prior.get("bad_run_streak", 0) or 0)
+        bad_now = bool(row.excluded_from_schedule)
+        streak = (prior_streak + 1) if bad_now else 0
+        persistent_excluded = bad_now and streak >= min_runs
+        excluded = bool(row.excluded_from_schedule or persistent_excluded)
+        reason_parts = [part for part in [row.exclusion_reason] if part]
+        if persistent_excluded:
+            reason_parts.append(
+                f"persistent_anomaly_streak {streak} >= {min_runs}"
+            )
+        updated_rows.append(
+            SourceHealthRow(
+                source_name=row.source_name,
+                version=row.version,
+                chain=row.chain,
+                input_rows=row.input_rows,
+                fees_with_nonpositive_tvl_input_count=row.fees_with_nonpositive_tvl_input_count,
+                fees_with_nonpositive_tvl_rate=row.fees_with_nonpositive_tvl_rate,
+                tvl_below_floor_count=row.tvl_below_floor_count,
+                tvl_below_floor_rate=row.tvl_below_floor_rate,
+                invalid_fee_tier_count=row.invalid_fee_tier_count,
+                invalid_fee_tier_rate=row.invalid_fee_tier_rate,
+                implied_fee_anomaly_count=row.implied_fee_anomaly_count,
+                implied_fee_anomaly_rate=row.implied_fee_anomaly_rate,
+                bad_run_streak=streak,
+                persistent_anomaly_excluded=persistent_excluded,
+                excluded_from_schedule=excluded,
+                exclusion_reason="; ".join(reason_parts),
+            )
+        )
+        updated_history[key] = {
+            "source_name": row.source_name,
+            "version": row.version,
+            "chain": row.chain,
+            "bad_run_streak": streak,
+            "excluded_now": excluded,
+            "last_seen_utc": now_label,
+            "fees_with_nonpositive_tvl_rate": row.fees_with_nonpositive_tvl_rate,
+            "invalid_fee_tier_rate": row.invalid_fee_tier_rate,
+            "implied_fee_anomaly_rate": row.implied_fee_anomaly_rate,
+        }
+    return updated_rows, updated_history
+
+
+def write_source_health_history(path: Path, history: dict[str, dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(history, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def write_source_health_csv(path: Path, rows: Iterable[SourceHealthRow]) -> None:
@@ -4033,6 +4127,8 @@ def write_source_health_csv(path: Path, rows: Iterable[SourceHealthRow]) -> None
                 "invalid_fee_tier_rate",
                 "implied_fee_anomaly_count",
                 "implied_fee_anomaly_rate",
+                "bad_run_streak",
+                "persistent_anomaly_excluded",
                 "excluded_from_schedule",
                 "exclusion_reason",
             ]
@@ -4052,6 +4148,8 @@ def write_source_health_csv(path: Path, rows: Iterable[SourceHealthRow]) -> None
                     f"{row.invalid_fee_tier_rate:.8f}",
                     row.implied_fee_anomaly_count,
                     f"{row.implied_fee_anomaly_rate:.8f}",
+                    row.bad_run_streak,
+                    ("true" if row.persistent_anomaly_excluded else "false"),
                     ("true" if row.excluded_from_schedule else "false"),
                     row.exclusion_reason,
                 ]
@@ -6230,10 +6328,24 @@ def write_dashboard_state_json(
                 "tvl_below_floor_rate": row.tvl_below_floor_rate,
                 "invalid_fee_tier_rate": row.invalid_fee_tier_rate,
                 "implied_fee_anomaly_rate": row.implied_fee_anomaly_rate,
+                "bad_run_streak": row.bad_run_streak,
+                "persistent_anomaly_excluded": row.persistent_anomaly_excluded,
                 "excluded_from_schedule": row.excluded_from_schedule,
                 "exclusion_reason": row.exclusion_reason,
             }
             for row in source_health_rows
+        ],
+        "excluded_sources": [
+            {
+                "source_name": row.source_name,
+                "version": row.version,
+                "chain": row.chain,
+                "bad_run_streak": row.bad_run_streak,
+                "persistent_anomaly_excluded": row.persistent_anomaly_excluded,
+                "reason": row.exclusion_reason,
+            }
+            for row in source_health_rows
+            if row.excluded_from_schedule
         ],
         "charts": chart_assets,
     }
@@ -6292,6 +6404,13 @@ def write_dashboard_html(path: Path, state: dict[str, Any]) -> None:
     <div class="panel kpi">Source Exclusions<span class="v" id="kpiExcluded">0</span></div>
   </div>
 
+  <div class="row">
+    <div class="panel">
+      <h2>Excluded Sources + Reasons</h2>
+      <div class="scroll"><table id="excludedTable"></table></div>
+    </div>
+  </div>
+
   <div class="row main">
     <div class="panel">
       <h2>Live Spikes Heatmap</h2>
@@ -6334,6 +6453,7 @@ def write_dashboard_html(path: Path, state: dict[str, Any]) -> None:
     const selectedPlan = schedule.selected_plan || [];
     const curve = schedule.curve || [];
     const sourceHealth = state.source_health || [];
+    const excludedSources = state.excluded_sources || [];
 
     const defaults = state.defaults || {};
     const planContext = defaults.selected_plan_context || "active";
@@ -6372,6 +6492,18 @@ def write_dashboard_html(path: Path, state: dict[str, Any]) -> None:
       el.appendChild(tbody);
     }
 
+    renderTable(
+      document.getElementById("excludedTable"),
+      [
+        {key: "source_name", label: "Source"},
+        {key: "version", label: "Version"},
+        {key: "chain", label: "Chain"},
+        {key: "bad_run_streak", label: "Bad Streak"},
+        {key: "persistent_anomaly_excluded", label: "Persistent"},
+        {key: "reason", label: "Reason"},
+      ],
+      excludedSources.slice(0, 30),
+    );
     renderTable(
       document.getElementById("spikesTable"),
       [
@@ -7273,6 +7405,20 @@ def write_report_html(
         f"(cap={max_implied_fee_rate:.2%}), invalid_fee_tier rejects={quality_invalid_fee_count:,}, "
         f"fees_with_nonpositive_tvl rejects={quality_tvl_nonpositive_count:,}."
     )
+    excluded_source_rows = [row for row in source_health_rows if row.excluded_from_schedule]
+    excluded_sources_compact_html = "".join(
+        [
+            "<tr>"
+            f"<td>{html.escape(r.source_name)}</td>"
+            f"<td>{html.escape(r.version)}</td>"
+            f"<td>{html.escape(r.chain)}</td>"
+            f"<td>{r.bad_run_streak}</td>"
+            f"<td>{'yes' if r.persistent_anomaly_excluded else 'no'}</td>"
+            f"<td>{html.escape(r.exclusion_reason)}</td>"
+            "</tr>"
+            for r in excluded_source_rows[:20]
+        ]
+    ) if excluded_source_rows else "<tr><td colspan='6'>No sources currently excluded.</td></tr>"
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
         "<tr><td colspan='13'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
@@ -7550,13 +7696,32 @@ def write_report_html(
     </section>
 
     <section class="card">
+      <h2>Excluded Sources + Reasons</h2>
+      <p class="note">
+        Auto-quarantine excludes sources with persistent TVL/fee anomalies. Streak is consecutive bad runs.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th><th>Version</th><th>Chain</th><th>Bad Run Streak</th><th>Persistent Excluded</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {excluded_sources_compact_html}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>Source Health</h2>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
               <th>Source</th><th>Version</th><th>Chain</th><th>Input Rows</th><th>fees_with_nonpositive_tvl_rate</th>
-              <th>tvl_below_floor_rate</th><th>invalid_fee_tier_rate</th><th>implied_fee_anomaly_rate</th><th>Excluded</th><th>Reason</th>
+              <th>tvl_below_floor_rate</th><th>invalid_fee_tier_rate</th><th>implied_fee_anomaly_rate</th><th>Bad Streak</th><th>Persistent</th><th>Excluded</th><th>Reason</th>
             </tr>
           </thead>
           <tbody>
@@ -7564,11 +7729,11 @@ def write_report_html(
               "<tr>"
               f"<td>{html.escape(r.source_name)}</td><td>{html.escape(r.version)}</td><td>{html.escape(r.chain)}</td>"
               f"<td>{r.input_rows}</td><td>{r.fees_with_nonpositive_tvl_rate:.4%}</td>"
-              f"<td>{r.tvl_below_floor_rate:.4%}</td><td>{r.invalid_fee_tier_rate:.4%}</td><td>{r.implied_fee_anomaly_rate:.4%}</td>"
+              f"<td>{r.tvl_below_floor_rate:.4%}</td><td>{r.invalid_fee_tier_rate:.4%}</td><td>{r.implied_fee_anomaly_rate:.4%}</td><td>{r.bad_run_streak}</td><td>{'yes' if r.persistent_anomaly_excluded else 'no'}</td>"
               f"<td>{'yes' if r.excluded_from_schedule else 'no'}</td><td>{html.escape(r.exclusion_reason)}</td>"
               "</tr>"
               for r in source_health_rows
-            ]) if source_health_rows else "<tr><td colspan='10'>No source health rows.</td></tr>"}
+            ]) if source_health_rows else "<tr><td colspan='12'>No source health rows.</td></tr>"}
           </tbody>
         </table>
       </div>
@@ -8088,6 +8253,15 @@ def main() -> int:
         max_invalid_fee_tier_rate=args.max_invalid_fee_tier_rate,
         max_implied_fee_anomaly_rate=args.max_implied_fee_anomaly_rate,
     )
+    source_health_history_file = Path(args.source_health_history_file).expanduser()
+    source_health_history = load_source_health_history(source_health_history_file)
+    source_health_rows, source_health_history = apply_persistent_source_quarantine(
+        rows=source_health_rows,
+        history=source_health_history,
+        persistent_runs=args.source_health_persistent_runs,
+        now_ts=int(time.time()),
+    )
+    write_source_health_history(source_health_history_file, source_health_history)
     excluded_schedule_sources = {
         (row.source_name, row.version, row.chain)
         for row in source_health_rows
