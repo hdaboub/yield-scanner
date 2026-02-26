@@ -37,11 +37,13 @@ Optional remote-control environment variables (for one-click reruns + live servi
 
 - Llama spike leaderboard (sortable/filterable)
 - Compact excluded-source panel with quarantine reasons
+- Source quarantine override controls (force-include / force-exclude by source key)
 - Schedule blocks and active selected plan
 - Moves/day frontier table
 - Operator decision charts per top pool:
   - line chart (USD/$1k/hr + TVL with schedule-window overlay)
   - heatmap (hour-of-week median USD/$1k/hr)
+- Schedule impact preview (before rerun) under selected objective/deploy/move-cost
 - One-click service restart and ad-hoc rerun controls (hours, move cost, deploy, workers, strict/relaxed)
 - Live service status + log tails
 - Pool-level drilldown with yield and swapCount time series

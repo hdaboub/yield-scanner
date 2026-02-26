@@ -1539,6 +1539,70 @@ class AnalyticsTests(unittest.TestCase):
         self.assertTrue(rows2[0].persistent_anomaly_excluded)
         self.assertIn("persistent_anomaly_streak", rows2[0].exclusion_reason)
 
+    def test_parse_source_key_overrides_accepts_common_delimiters(self) -> None:
+        parsed = scanner.parse_source_key_overrides(
+            [
+                "s1|v3|ethereum",
+                "s2:v4:base",
+                "s3,v2,bnb",
+                "invalid-format",
+            ]
+        )
+        self.assertIn(("s1", "v3", "ethereum"), parsed)
+        self.assertIn(("s2", "v4", "base"), parsed)
+        self.assertIn(("s3", "v2", "bnb"), parsed)
+        self.assertNotIn(("invalid-format", "", ""), parsed)
+
+    def test_apply_source_health_overrides_include_and_exclude(self) -> None:
+        rows = [
+            scanner.SourceHealthRow(
+                source_name="s1",
+                version="v3",
+                chain="ethereum",
+                input_rows=10,
+                fees_with_nonpositive_tvl_input_count=3,
+                fees_with_nonpositive_tvl_rate=0.3,
+                tvl_below_floor_count=2,
+                tvl_below_floor_rate=0.2,
+                invalid_fee_tier_count=0,
+                invalid_fee_tier_rate=0.0,
+                implied_fee_anomaly_count=0,
+                implied_fee_anomaly_rate=0.0,
+                bad_run_streak=2,
+                persistent_anomaly_excluded=False,
+                excluded_from_schedule=True,
+                exclusion_reason="bad_rate",
+            ),
+            scanner.SourceHealthRow(
+                source_name="s2",
+                version="v4",
+                chain="base",
+                input_rows=10,
+                fees_with_nonpositive_tvl_input_count=0,
+                fees_with_nonpositive_tvl_rate=0.0,
+                tvl_below_floor_count=0,
+                tvl_below_floor_rate=0.0,
+                invalid_fee_tier_count=0,
+                invalid_fee_tier_rate=0.0,
+                implied_fee_anomaly_count=0,
+                implied_fee_anomaly_rate=0.0,
+                bad_run_streak=0,
+                persistent_anomaly_excluded=False,
+                excluded_from_schedule=False,
+                exclusion_reason="",
+            ),
+        ]
+        updated = scanner.apply_source_health_overrides(
+            rows=rows,
+            force_include={("s1", "v3", "ethereum")},
+            force_exclude={("s2", "v4", "base")},
+        )
+        by_key = {(r.source_name, r.version, r.chain): r for r in updated}
+        self.assertFalse(by_key[("s1", "v3", "ethereum")].excluded_from_schedule)
+        self.assertIn("manual_include_override", by_key[("s1", "v3", "ethereum")].exclusion_reason)
+        self.assertTrue(by_key[("s2", "v4", "base")].excluded_from_schedule)
+        self.assertIn("manual_exclude_override", by_key[("s2", "v4", "base")].exclusion_reason)
+
     def test_resolve_default_deploy_usd_auto_mode_uses_capacity_percentile(self) -> None:
         now = int(dt.datetime(2026, 2, 24, 12, 0, tzinfo=dt.timezone.utc).timestamp())
         rows = [

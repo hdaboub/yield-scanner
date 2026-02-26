@@ -203,6 +203,8 @@ def _start_remote_run(
     deploy_usd: float,
     workers: int,
     mode: str,
+    force_include_sources: list[str] | None = None,
+    force_exclude_sources: list[str] | None = None,
 ) -> tuple[bool, str]:
     args = [
         "./.venv/bin/python",
@@ -226,6 +228,10 @@ def _start_remote_run(
         args.extend(["--schedule-min-observed-days", "30"])
     else:
         args.extend(["--schedule-min-observed-days", "14", "--schedule-min-hit-rate", "0.50"])
+    for key in (force_include_sources or []):
+        args.extend(["--schedule-force-include-source", str(key)])
+    for key in (force_exclude_sources or []):
+        args.extend(["--schedule-force-exclude-source", str(key)])
 
     remote_cmd = (
         "cd "
@@ -306,6 +312,115 @@ def _render_pool_line_chart(pool_df: pd.DataFrame, scheduled_slots: set[int], ti
     return fig
 
 
+def _source_key(source_name: str, version: str, chain: str) -> str:
+    return f"{source_name}|{version}|{chain}"
+
+
+def _collect_excluded_source_keys(source_health_df: pd.DataFrame) -> set[str]:
+    out: set[str] = set()
+    if source_health_df.empty:
+        return out
+    for _, row in source_health_df.iterrows():
+        try:
+            excluded = str(row.get("excluded_from_schedule", "")).lower() in {"1", "true", "yes"}
+            if not excluded:
+                continue
+            out.add(_source_key(str(row.get("source_name", "")), str(row.get("version", "")), str(row.get("chain", ""))))
+        except Exception:
+            continue
+    return out
+
+
+def _filter_schedule_with_source_overrides(
+    schedule_df: pd.DataFrame,
+    base_excluded: set[str],
+    force_include: set[str],
+    force_exclude: set[str],
+) -> tuple[pd.DataFrame, set[str]]:
+    if schedule_df.empty:
+        return schedule_df.copy(), set()
+    effective_excluded = (set(base_excluded) - set(force_include)) | set(force_exclude)
+    work = schedule_df.copy()
+    work["source_key"] = (
+        work.get("source_name", "").astype(str)
+        + "|"
+        + work.get("version", "").astype(str)
+        + "|"
+        + work.get("chain", "").astype(str)
+    )
+    filtered = work[~work["source_key"].isin(effective_excluded)].copy()
+    return filtered, effective_excluded
+
+
+def _preview_selected_plan(
+    schedule_df: pd.DataFrame,
+    objective: str,
+    deploy_usd: float,
+    move_cost_usd: float,
+    max_moves_per_day: int,
+    min_hold_hours: int = 1,
+) -> pd.DataFrame:
+    if schedule_df.empty:
+        return pd.DataFrame()
+    required_cols = {"next_add_ts", "next_remove_ts", "max_deployable_usd_est", "block_hours"}
+    if not required_cols.issubset(set(schedule_df.columns)):
+        return pd.DataFrame()
+    work = schedule_df.copy()
+    objective_col = (
+        "risk_adjusted_incremental_usd_per_1000"
+        if objective == "risk_adjusted" and "risk_adjusted_incremental_usd_per_1000" in work.columns
+        else "incremental_usd_per_1000"
+    )
+    if objective_col not in work.columns:
+        return pd.DataFrame()
+
+    work["next_add_ts"] = pd.to_numeric(work["next_add_ts"], errors="coerce").fillna(0).astype(int)
+    work["next_remove_ts"] = pd.to_numeric(work["next_remove_ts"], errors="coerce").fillna(0).astype(int)
+    work["block_hours"] = pd.to_numeric(work["block_hours"], errors="coerce").fillna(0).astype(float)
+    work["max_deployable_usd_est"] = pd.to_numeric(work["max_deployable_usd_est"], errors="coerce").fillna(0.0)
+    work[objective_col] = pd.to_numeric(work[objective_col], errors="coerce").fillna(0.0)
+    work["effective_deploy_usd"] = work["max_deployable_usd_est"].clip(upper=max(0.0, float(deploy_usd)))
+    work["expected_net_usd"] = (work["effective_deploy_usd"] / 1000.0) * work[objective_col] - max(0.0, float(move_cost_usd))
+    work["net_per_hour"] = work["expected_net_usd"] / work["block_hours"].clip(lower=1.0)
+    work["add_dt"] = pd.to_datetime(work["next_add_ts"], unit="s", utc=True, errors="coerce")
+    work["day_key"] = work["add_dt"].dt.strftime("%Y-%m-%d")
+    candidates = work[
+        (work["block_hours"] >= max(1, int(min_hold_hours)))
+        & (work["effective_deploy_usd"] > 0.0)
+        & (work["expected_net_usd"] > 0.0)
+    ].copy()
+    if candidates.empty:
+        return pd.DataFrame()
+    candidates = candidates.sort_values(["net_per_hour", "expected_net_usd"], ascending=False)
+
+    selected_idx: list[int] = []
+    day_counts: dict[str, int] = {}
+    intervals: list[tuple[int, int]] = []
+    max_moves = max(1, int(max_moves_per_day))
+    for idx, row in candidates.iterrows():
+        s = int(row["next_add_ts"])
+        e = int(row["next_remove_ts"])
+        if s <= 0 or e <= s:
+            continue
+        day = str(row.get("day_key", ""))
+        if day_counts.get(day, 0) >= max_moves:
+            continue
+        overlap = False
+        for os, oe in intervals:
+            if not (e <= os or s >= oe):
+                overlap = True
+                break
+        if overlap:
+            continue
+        selected_idx.append(idx)
+        intervals.append((s, e))
+        day_counts[day] = day_counts.get(day, 0) + 1
+    if not selected_idx:
+        return pd.DataFrame()
+    selected = candidates.loc[selected_idx].copy().sort_values("next_add_ts")
+    return selected
+
+
 def main() -> None:
     st.set_page_config(page_title="Yield Scanner Dashboard", layout="wide")
     artifacts = _artifacts_dir()
@@ -319,8 +434,22 @@ def main() -> None:
     frontier = pd.DataFrame(state.get("schedule", {}).get("curve", []))
     source_health = pd.DataFrame(state.get("source_health", []))
     excluded_sources = pd.DataFrame(state.get("excluded_sources", []))
+    schedule_enhanced = _read_csv(artifacts / "schedule_enhanced.csv")
     llama_rank = _read_csv(artifacts / "llama_weth_spike_rankings.csv")
     eth_px = _eth_price_series(artifacts, days=7)
+    source_options: list[str] = []
+    if not source_health.empty:
+        source_options = sorted(
+            {
+                _source_key(str(r.get("source_name", "")), str(r.get("version", "")), str(r.get("chain", "")))
+                for _, r in source_health.iterrows()
+                if str(r.get("source_name", "")).strip()
+            }
+        )
+    defaults = state.get("defaults", {}) if isinstance(state, dict) else {}
+    default_force_include = [str(x) for x in (defaults.get("schedule_force_include_sources") or [])]
+    default_force_exclude = [str(x) for x in (defaults.get("schedule_force_exclude_sources") or [])]
+    base_excluded_keys = _collect_excluded_source_keys(source_health)
 
     with st.sidebar:
         st.header("Run Controls")
@@ -333,8 +462,33 @@ def main() -> None:
         hours = st.number_input("hours", min_value=24, max_value=24 * 365, value=504, step=24)
         move_cost = st.number_input("move_cost_usd", min_value=0.0, value=50.0, step=5.0)
         deploy_usd = st.number_input("deploy_usd", min_value=100.0, value=10000.0, step=500.0)
+        max_moves = st.number_input(
+            "max_moves_per_day",
+            min_value=1,
+            max_value=24,
+            value=int(defaults.get("max_moves_per_day", 4) or 4),
+            step=1,
+        )
+        objective = st.selectbox(
+            "objective",
+            options=["risk_adjusted", "raw"],
+            index=0 if str(defaults.get("objective", "risk_adjusted")) == "risk_adjusted" else 1,
+        )
         workers = st.number_input("workers", min_value=1, max_value=64, value=8, step=1)
         mode = st.selectbox("strict/relaxed", options=["relaxed", "strict"], index=0)
+        st.caption("Source quarantine overrides")
+        force_include_sel = st.multiselect(
+            "Force include sources",
+            options=source_options,
+            default=[x for x in default_force_include if x in source_options],
+            help="Temporarily include sources even if source-health excludes them.",
+        )
+        force_exclude_sel = st.multiselect(
+            "Force exclude sources",
+            options=source_options,
+            default=[x for x in default_force_exclude if x in source_options],
+            help="Temporarily exclude sources for what-if planning.",
+        )
 
         if st.button("Restart service run", use_container_width=True):
             ok, msg = _restart_service(remote_host, remote_service)
@@ -354,6 +508,8 @@ def main() -> None:
                 deploy_usd=float(deploy_usd),
                 workers=int(workers),
                 mode=mode,
+                force_include_sources=list(force_include_sel),
+                force_exclude_sources=list(force_exclude_sel),
             )
             if ok:
                 st.success(msg)
@@ -441,6 +597,83 @@ def main() -> None:
     else:
         st.dataframe(selected, use_container_width=True)
 
+    st.subheader("Schedule Impact Preview (Source Overrides)")
+    if schedule_enhanced.empty:
+        st.info("schedule_enhanced.csv not available for preview.")
+    else:
+        force_include_set = set(force_include_sel)
+        force_exclude_set = set(force_exclude_sel)
+        filtered_schedule, effective_excluded = _filter_schedule_with_source_overrides(
+            schedule_df=schedule_enhanced,
+            base_excluded=base_excluded_keys,
+            force_include=force_include_set,
+            force_exclude=force_exclude_set,
+        )
+        baseline_preview = _preview_selected_plan(
+            schedule_df=schedule_enhanced[~(
+                (
+                    schedule_enhanced.get("source_name", "").astype(str)
+                    + "|"
+                    + schedule_enhanced.get("version", "").astype(str)
+                    + "|"
+                    + schedule_enhanced.get("chain", "").astype(str)
+                ).isin(base_excluded_keys)
+            )].copy() if not schedule_enhanced.empty else schedule_enhanced.copy(),
+            objective=str(objective),
+            deploy_usd=float(deploy_usd),
+            move_cost_usd=float(move_cost),
+            max_moves_per_day=int(max_moves),
+            min_hold_hours=1,
+        )
+        override_preview = _preview_selected_plan(
+            schedule_df=filtered_schedule,
+            objective=str(objective),
+            deploy_usd=float(deploy_usd),
+            move_cost_usd=float(move_cost),
+            max_moves_per_day=int(max_moves),
+            min_hold_hours=1,
+        )
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Base excluded sources", len(base_excluded_keys))
+        p2.metric("Effective excluded sources", len(effective_excluded))
+        p3.metric("Schedule rows after overrides", len(filtered_schedule))
+
+        q1, q2 = st.columns(2)
+        q1.metric(
+            "Baseline preview selected",
+            len(baseline_preview),
+            delta=f"net ${baseline_preview['expected_net_usd'].sum():,.2f}" if not baseline_preview.empty else "net $0.00",
+        )
+        q2.metric(
+            "Override preview selected",
+            len(override_preview),
+            delta=f"net ${override_preview['expected_net_usd'].sum():,.2f}" if not override_preview.empty else "net $0.00",
+        )
+        st.caption(
+            "Preview uses current artifacts with objective/deploy/move_cost/max_moves and overlap rules. "
+            "Run ad-hoc scan to materialize full outputs."
+        )
+        if override_preview.empty:
+            st.warning("No selected rows in override preview.")
+        else:
+            show_cols = [
+                c
+                for c in [
+                    "source_name",
+                    "version",
+                    "chain",
+                    "pair",
+                    "next_add_ts",
+                    "next_remove_ts",
+                    "effective_deploy_usd",
+                    "expected_net_usd",
+                    "max_deployable_usd_est",
+                    "capacity_flag",
+                ]
+                if c in override_preview.columns
+            ]
+            st.dataframe(override_preview[show_cols].head(40), use_container_width=True)
+
     st.subheader("Moves/Day Frontier")
     if frontier.empty:
         st.info("No frontier rows.")
@@ -455,7 +688,6 @@ def main() -> None:
 
     st.subheader("Operator Decision Charts (Top Pools)")
     hourly = _read_csv(artifacts / "hourly_observations.csv")
-    schedule_enhanced = _read_csv(artifacts / "schedule_enhanced.csv")
     if hourly.empty:
         st.info("hourly_observations.csv not available.")
     else:

@@ -1036,6 +1036,24 @@ def parse_args() -> argparse.Namespace:
         help="Auto-exclude sources with anomaly streaks at or above this many consecutive bad runs (default: 3).",
     )
     parser.add_argument(
+        "--schedule-force-include-source",
+        action="append",
+        default=[],
+        help=(
+            "Force-include a schedule source key even if source-health would exclude it. "
+            "Format: source|version|chain (or source:version:chain). Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--schedule-force-exclude-source",
+        action="append",
+        default=[],
+        help=(
+            "Force-exclude a schedule source key. "
+            "Format: source|version|chain (or source:version:chain). Repeatable."
+        ),
+    )
+    parser.add_argument(
         "--charts-enable",
         dest="charts_enable",
         action="store_true",
@@ -4104,6 +4122,71 @@ def apply_persistent_source_quarantine(
     return updated_rows, updated_history
 
 
+def _parse_source_key(value: str) -> tuple[str, str, str] | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if "|" in raw:
+        parts = [p.strip() for p in raw.split("|")]
+    elif ":" in raw:
+        parts = [p.strip() for p in raw.split(":")]
+    elif "," in raw:
+        parts = [p.strip() for p in raw.split(",")]
+    else:
+        return None
+    if len(parts) != 3 or not all(parts):
+        return None
+    return (parts[0], parts[1], parts[2])
+
+
+def parse_source_key_overrides(values: Iterable[str]) -> set[tuple[str, str, str]]:
+    out: set[tuple[str, str, str]] = set()
+    for value in values:
+        parsed = _parse_source_key(value)
+        if parsed is not None:
+            out.add(parsed)
+    return out
+
+
+def apply_source_health_overrides(
+    rows: list[SourceHealthRow],
+    force_include: set[tuple[str, str, str]],
+    force_exclude: set[tuple[str, str, str]],
+) -> list[SourceHealthRow]:
+    updated: list[SourceHealthRow] = []
+    for row in rows:
+        key = (row.source_name, row.version, row.chain)
+        excluded = row.excluded_from_schedule
+        reason_parts = [part for part in [row.exclusion_reason] if part]
+        if key in force_include and key not in force_exclude:
+            excluded = False
+            reason_parts.append("manual_include_override")
+        if key in force_exclude:
+            excluded = True
+            reason_parts.append("manual_exclude_override")
+        updated.append(
+            SourceHealthRow(
+                source_name=row.source_name,
+                version=row.version,
+                chain=row.chain,
+                input_rows=row.input_rows,
+                fees_with_nonpositive_tvl_input_count=row.fees_with_nonpositive_tvl_input_count,
+                fees_with_nonpositive_tvl_rate=row.fees_with_nonpositive_tvl_rate,
+                tvl_below_floor_count=row.tvl_below_floor_count,
+                tvl_below_floor_rate=row.tvl_below_floor_rate,
+                invalid_fee_tier_count=row.invalid_fee_tier_count,
+                invalid_fee_tier_rate=row.invalid_fee_tier_rate,
+                implied_fee_anomaly_count=row.implied_fee_anomaly_count,
+                implied_fee_anomaly_rate=row.implied_fee_anomaly_rate,
+                bad_run_streak=row.bad_run_streak,
+                persistent_anomaly_excluded=row.persistent_anomaly_excluded,
+                excluded_from_schedule=excluded,
+                exclusion_reason="; ".join(dict.fromkeys(reason_parts)),
+            )
+        )
+    return updated
+
+
 def write_source_health_history(path: Path, history: dict[str, dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(history, indent=2, sort_keys=True), encoding="utf-8")
@@ -6093,6 +6176,8 @@ def write_dashboard_state_json(
     max_implied_fee_rate: float = 0.05,
     default_deploy_mode: str = "fixed",
     configured_default_deploy_usd: float = 0.0,
+    schedule_force_include_sources: list[str] | None = None,
+    schedule_force_exclude_sources: list[str] | None = None,
 ) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     chart_assets = chart_assets or {}
@@ -6219,6 +6304,8 @@ def write_dashboard_state_json(
             "max_implied_fee_rate": max_implied_fee_rate,
             "default_deploy_mode": default_deploy_mode,
             "configured_default_deploy_usd": configured_default_deploy_usd,
+            "schedule_force_include_sources": list(schedule_force_include_sources or []),
+            "schedule_force_exclude_sources": list(schedule_force_exclude_sources or []),
             "scenario_plan_filename": scenario_plan_filename,
             "selected_plan_context": selected_plan_context,
             "selected_plan_context_scenario": selected_plan_context_scenario,
@@ -7099,6 +7186,8 @@ def write_report_html(
     selected_plan_context_scenario: str = "",
     default_deploy_mode: str = "fixed",
     configured_default_deploy_usd: float = 0.0,
+    schedule_force_include_sources: list[str] | None = None,
+    schedule_force_exclude_sources: list[str] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     schedule_enhanced = schedule_enhanced or []
@@ -7109,6 +7198,8 @@ def write_report_html(
     source_health_rows = source_health_rows or []
     chart_assets = chart_assets or {}
     quality_reason_totals = quality_reason_totals or {}
+    schedule_force_include_sources = schedule_force_include_sources or []
+    schedule_force_exclude_sources = schedule_force_exclude_sources or []
     top_rankings = rankings[:top_n]
     top_schedules = schedules[:top_n]
     top_schedule_enhanced = schedule_enhanced[:top_n]
@@ -7404,6 +7495,10 @@ def write_report_html(
         f"Data-quality anomalies: implied_fee_rate rejects={quality_implied_count:,} "
         f"(cap={max_implied_fee_rate:.2%}), invalid_fee_tier rejects={quality_invalid_fee_count:,}, "
         f"fees_with_nonpositive_tvl rejects={quality_tvl_nonpositive_count:,}."
+    )
+    source_override_note = (
+        f"Manual source overrides: include={len(schedule_force_include_sources)}, "
+        f"exclude={len(schedule_force_exclude_sources)}."
     )
     excluded_source_rows = [row for row in source_health_rows if row.excluded_from_schedule]
     excluded_sources_compact_html = "".join(
@@ -7738,6 +7833,7 @@ def write_report_html(
         </table>
       </div>
       <p class="note">{html.escape(quality_anomaly_note)}</p>
+      <p class="note">{html.escape(source_override_note)}</p>
     </section>
 
     <section class="card">
@@ -8261,6 +8357,14 @@ def main() -> int:
         persistent_runs=args.source_health_persistent_runs,
         now_ts=int(time.time()),
     )
+    force_include_sources = parse_source_key_overrides(args.schedule_force_include_source)
+    force_exclude_sources = parse_source_key_overrides(args.schedule_force_exclude_source)
+    if force_include_sources or force_exclude_sources:
+        source_health_rows = apply_source_health_overrides(
+            rows=source_health_rows,
+            force_include=force_include_sources,
+            force_exclude=force_exclude_sources,
+        )
     write_source_health_history(source_health_history_file, source_health_history)
     excluded_schedule_sources = {
         (row.source_name, row.version, row.chain)
@@ -8770,6 +8874,8 @@ def main() -> int:
         max_implied_fee_rate=args.max_implied_fee_rate,
         default_deploy_mode=args.default_deploy_mode,
         configured_default_deploy_usd=args.default_deploy_usd,
+        schedule_force_include_sources=list(args.schedule_force_include_source),
+        schedule_force_exclude_sources=list(args.schedule_force_exclude_source),
     )
     write_dashboard_html(dashboard_html, dashboard_state)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
@@ -8842,6 +8948,8 @@ def main() -> int:
         selected_plan_context_scenario=selected_plan_context_scenario,
         default_deploy_mode=args.default_deploy_mode,
         configured_default_deploy_usd=args.default_deploy_usd,
+        schedule_force_include_sources=list(args.schedule_force_include_source),
+        schedule_force_exclude_sources=list(args.schedule_force_exclude_source),
     )
 
     print_top(rankings, args.top)
