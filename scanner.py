@@ -682,8 +682,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schedule-min-observed-days",
         type=float,
-        default=14.0,
-        help="Minimum observed history (days) for a pool to be schedule-eligible (default: 14).",
+        default=21.0,
+        help="Minimum observed history (days) for a pool to be schedule-eligible (default: 21).",
     )
     parser.add_argument(
         "--schedule-min-block-target",
@@ -913,6 +913,27 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=10000.0,
         help="Default deploy size (USD) used for execution panel and break-even scaling (default: 10000).",
+    )
+    parser.add_argument(
+        "--default-deploy-mode",
+        choices=["fixed", "auto_p50", "auto_p75"],
+        default="auto_p50",
+        help=(
+            "How to resolve default deploy USD: fixed uses --default-deploy-usd; "
+            "auto_p50/auto_p75 derive from schedule_enhanced max_deployable_usd_est percentiles."
+        ),
+    )
+    parser.add_argument(
+        "--default-deploy-auto-min-usd",
+        type=float,
+        default=1000.0,
+        help="Minimum default deploy USD when --default-deploy-mode is auto_* (default: 1000).",
+    )
+    parser.add_argument(
+        "--default-deploy-auto-max-usd",
+        type=float,
+        default=50000.0,
+        help="Maximum default deploy USD when --default-deploy-mode is auto_* (default: 50000).",
     )
     parser.add_argument(
         "--default-move-cost-usd",
@@ -5818,6 +5839,52 @@ def resolve_schedule_min_max_deployable_usd(
     return resolved
 
 
+def resolve_default_deploy_usd(
+    rows: list[ScheduleEnhancedRow],
+    mode: str,
+    fixed_value: float,
+    auto_min_usd: float,
+    auto_max_usd: float,
+) -> float:
+    fixed = max(0.0, float(fixed_value))
+    if mode == "fixed" or not rows:
+        return fixed
+    values = [max(0.0, r.max_deployable_usd_est) for r in rows if r.max_deployable_usd_est > 0]
+    if not values:
+        return fixed
+    quantile = 0.75 if mode == "auto_p75" else 0.50
+    resolved = percentile(values, quantile)
+    lo = max(0.0, float(auto_min_usd))
+    hi = max(lo, float(auto_max_usd))
+    resolved = max(lo, min(hi, resolved))
+    return resolved
+
+
+def choose_fallback_curve_row(
+    rows: list[MovesDayCurveRow],
+    objective: str,
+    default_move_cost_usd: float,
+    default_deploy_usd: float,
+    default_max_moves_per_day: int,
+) -> MovesDayCurveRow | None:
+    candidates = [row for row in rows if row.selected_blocks_count > 0 and row.objective == objective]
+    if not candidates:
+        return None
+
+    def _rank_key(row: MovesDayCurveRow) -> tuple[float, ...]:
+        nonzero_cost_penalty = 0.0 if row.move_cost_usd_per_move > 0 else 1.0
+        return (
+            nonzero_cost_penalty,
+            -row.total_net_usd,
+            -float(row.selected_blocks_count),
+            abs(row.move_cost_usd_per_move - default_move_cost_usd),
+            abs(row.deploy_usd - default_deploy_usd),
+            abs(float(row.max_moves_per_day - default_max_moves_per_day)),
+        )
+
+    return min(candidates, key=_rank_key)
+
+
 def write_schedule_summary_stats_csv(path: Path, stats: ScheduleSummaryStats) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -5926,6 +5993,8 @@ def write_dashboard_state_json(
     schedule_fallback_trace: str = "",
     schedule_min_observed_days: float = 0.0,
     max_implied_fee_rate: float = 0.05,
+    default_deploy_mode: str = "fixed",
+    configured_default_deploy_usd: float = 0.0,
 ) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     chart_assets = chart_assets or {}
@@ -6050,6 +6119,8 @@ def write_dashboard_state_json(
             "schedule_fallback_trace": schedule_fallback_trace,
             "schedule_min_observed_days": schedule_min_observed_days,
             "max_implied_fee_rate": max_implied_fee_rate,
+            "default_deploy_mode": default_deploy_mode,
+            "configured_default_deploy_usd": configured_default_deploy_usd,
             "scenario_plan_filename": scenario_plan_filename,
             "selected_plan_context": selected_plan_context,
             "selected_plan_context_scenario": selected_plan_context_scenario,
@@ -6264,8 +6335,13 @@ def write_dashboard_html(path: Path, state: dict[str, Any]) -> None:
     const curve = schedule.curve || [];
     const sourceHealth = state.source_health || [];
 
+    const defaults = state.defaults || {};
+    const planContext = defaults.selected_plan_context || "active";
+    const fallbackSuffix = planContext === "fallback"
+      ? ` | Fallback Scenario: ${defaults.selected_plan_context_scenario || "n/a"}`
+      : "";
     document.getElementById("runMeta").textContent =
-      `Generated: ${state.generated_utc || "n/a"} | Objective: ${(state.defaults||{}).objective || "n/a"} | Scenario: ${(state.defaults||{}).scenario_plan_filename || "n/a"}`;
+      `Generated: ${state.generated_utc || "n/a"} | Objective: ${defaults.objective || "n/a"} | Scenario: ${defaults.scenario_plan_filename || "n/a"}${fallbackSuffix}`;
     document.getElementById("kpiSpikes").textContent = String(spikes.length);
     document.getElementById("kpiBlocks").textContent = String(topBlocks.length);
     document.getElementById("kpiPlan").textContent = String(selectedPlan.length);
@@ -6887,6 +6963,10 @@ def write_report_html(
     schedule_min_observed_days: float = 0.0,
     max_implied_fee_rate: float = 0.05,
     quality_reason_totals: dict[str, int] | None = None,
+    selected_plan_context: str = "active",
+    selected_plan_context_scenario: str = "",
+    default_deploy_mode: str = "fixed",
+    configured_default_deploy_usd: float = 0.0,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     schedule_enhanced = schedule_enhanced or []
@@ -7133,6 +7213,14 @@ def write_report_html(
             f"selected={active_schedule_diag.selected_blocks_count}, "
             f"reason_if_zero={active_schedule_diag.reason_if_zero or 'n/a'}."
         )
+    selected_plan_context_note = ""
+    if selected_plan_context == "fallback":
+        selected_plan_context_note = (
+            "Default scenario produced no qualifying moves; "
+            f"using fallback scenario: {selected_plan_context_scenario or 'n/a'}."
+        )
+    else:
+        selected_plan_context_note = "Using configured default scenario."
     plan_rows_html: list[str] = []
     for row in selected_plan_rows[:3]:
         plan_rows_html.append(
@@ -7492,6 +7580,12 @@ def write_report_html(
       <p class="note">
         Scenario: objective={html.escape(optimizer_objective)}, deploy=${default_deploy_usd:,.0f}, move cost=${default_move_cost_usd:.2f}/move,
         max_moves/day={default_max_moves_per_day}. Export file: <code>{html.escape(scenario_plan_filename)}</code>.
+      </p>
+      <p class="note">
+        Deploy sizing mode: {html.escape(default_deploy_mode)} (configured deploy=${configured_default_deploy_usd:,.0f}, active deploy=${default_deploy_usd:,.0f}).
+      </p>
+      <p class="note">
+        {html.escape(selected_plan_context_note)}
       </p>
       <p class="note">
         Schedule build trace: {html.escape(schedule_fallback_trace or 'n/a')}. Minimum observed pool history for schedule eligibility: {schedule_min_observed_days:.1f} days.
@@ -8275,11 +8369,27 @@ def main() -> int:
         capacity_deploy_fraction_cap=args.capacity_deploy_fraction_cap,
         capacity_warning_usd=args.schedule_min_max_deployable_usd,
     )
+    resolved_default_deploy_usd = resolve_default_deploy_usd(
+        rows=schedule_enhanced,
+        mode=args.default_deploy_mode,
+        fixed_value=args.default_deploy_usd,
+        auto_min_usd=args.default_deploy_auto_min_usd,
+        auto_max_usd=args.default_deploy_auto_max_usd,
+    )
+    print(
+        (
+            "Resolved default deploy USD: "
+            f"mode={args.default_deploy_mode}, configured={args.default_deploy_usd:.2f}, "
+            f"active={resolved_default_deploy_usd:.2f}"
+        ),
+        file=sys.stderr,
+    )
     deploy_scenarios = sorted(
         {
             1000.0,
             10000.0,
             float(args.default_deploy_usd),
+            float(resolved_default_deploy_usd),
         }
     )
     max_moves_per_day_scenarios = sorted({1, 2, 4, 8, int(args.default_max_moves_per_day)})
@@ -8326,7 +8436,7 @@ def main() -> int:
         schedule_rows=schedule_enhanced,
         objective=args.optimizer_objective,
         move_cost_usd_per_move=args.default_move_cost_usd,
-        deploy_usd=args.default_deploy_usd,
+        deploy_usd=resolved_default_deploy_usd,
         max_moves_per_day=args.default_max_moves_per_day,
         min_hold_hours=args.moves_min_hold_hours,
         cooldown_hours_between_moves=args.moves_cooldown_hours,
@@ -8337,18 +8447,19 @@ def main() -> int:
     selected_plan_for_state = selected_plan_default
     selected_plan_context = "active"
     selected_plan_context_scenario = (
-        f"{args.optimizer_objective}|deploy={args.default_deploy_usd:.0f}|"
+        f"{args.optimizer_objective}|deploy={resolved_default_deploy_usd:.0f}|"
         f"cost={args.default_move_cost_usd:.0f}|moves={args.default_max_moves_per_day}|"
         f"hold={max(1, args.moves_min_hold_hours)}"
     )
     if not selected_plan_for_state:
-        fallback_curve = sorted(
-            [row for row in moves_day_curve if row.selected_blocks_count > 0 and row.objective == args.optimizer_objective],
-            key=lambda r: (r.total_net_usd, r.selected_blocks_count),
-            reverse=True,
+        fb = choose_fallback_curve_row(
+            rows=moves_day_curve,
+            objective=args.optimizer_objective,
+            default_move_cost_usd=args.default_move_cost_usd,
+            default_deploy_usd=resolved_default_deploy_usd,
+            default_max_moves_per_day=args.default_max_moves_per_day,
         )
-        if fallback_curve:
-            fb = fallback_curve[0]
+        if fb is not None:
             selected_plan_for_state = select_schedule_plan(
                 schedule_rows=schedule_enhanced,
                 objective=fb.objective,
@@ -8369,7 +8480,7 @@ def main() -> int:
                     f"hold={max(1, fb.min_hold_hours)}"
                 )
     active_plan_move_cost = args.default_move_cost_usd
-    active_plan_deploy_usd = args.default_deploy_usd
+    active_plan_deploy_usd = resolved_default_deploy_usd
     active_plan_max_moves = args.default_max_moves_per_day
     if selected_plan_context == "fallback" and selected_plan_context_scenario:
         fb_diag = next(
@@ -8389,7 +8500,7 @@ def main() -> int:
         for row in moves_day_curve
         if row.objective == args.optimizer_objective
         and abs(row.move_cost_usd_per_move - args.default_move_cost_usd) < 1e-9
-        and abs(row.deploy_usd - args.default_deploy_usd) < 1e-9
+        and abs(row.deploy_usd - resolved_default_deploy_usd) < 1e-9
         and row.max_moves_per_day == args.default_max_moves_per_day
     ]
     if matching_curve:
@@ -8474,7 +8585,7 @@ def main() -> int:
         schedule_run_diagnostics=schedule_run_diagnostics,
         scenario_plan_filename=scenario_plan_csv.name,
         default_move_cost_usd=args.default_move_cost_usd,
-        default_deploy_usd=args.default_deploy_usd,
+        default_deploy_usd=resolved_default_deploy_usd,
         default_max_moves_per_day=args.default_max_moves_per_day,
         optimizer_objective=args.optimizer_objective,
         chart_assets=chart_assets,
@@ -8483,6 +8594,8 @@ def main() -> int:
         schedule_fallback_trace=schedule_fallback_trace,
         schedule_min_observed_days=args.schedule_min_observed_days,
         max_implied_fee_rate=args.max_implied_fee_rate,
+        default_deploy_mode=args.default_deploy_mode,
+        configured_default_deploy_usd=args.default_deploy_usd,
     )
     write_dashboard_html(dashboard_html, dashboard_state)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
@@ -8539,7 +8652,7 @@ def main() -> int:
         run_stats_always_spike_zero_avg_pct=run_stats_always_spike_zero_avg_pct,
         require_run_history_quality_ok=args.require_run_history_quality_ok,
         optimizer_objective=args.optimizer_objective,
-        default_deploy_usd=args.default_deploy_usd,
+        default_deploy_usd=resolved_default_deploy_usd,
         default_move_cost_usd=args.default_move_cost_usd,
         default_max_moves_per_day=args.default_max_moves_per_day,
         schedule_summary_stats=schedule_summary_stats,
@@ -8551,6 +8664,10 @@ def main() -> int:
         schedule_min_observed_days=args.schedule_min_observed_days,
         max_implied_fee_rate=args.max_implied_fee_rate,
         quality_reason_totals=dict(quality_reason_totals),
+        selected_plan_context=selected_plan_context,
+        selected_plan_context_scenario=selected_plan_context_scenario,
+        default_deploy_mode=args.default_deploy_mode,
+        configured_default_deploy_usd=args.default_deploy_usd,
     )
 
     print_top(rankings, args.top)

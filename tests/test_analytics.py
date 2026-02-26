@@ -1502,6 +1502,146 @@ class AnalyticsTests(unittest.TestCase):
         self.assertTrue(schedules)
         self.assertIn("relax_hit_0.10", trace)
 
+    def test_resolve_default_deploy_usd_auto_mode_uses_capacity_percentile(self) -> None:
+        now = int(dt.datetime(2026, 2, 24, 12, 0, tzinfo=dt.timezone.utc).timestamp())
+        rows = [
+            scanner.ScheduleEnhancedRow(
+                pool_rank=1,
+                source_name="s1",
+                version="v3",
+                chain="ethereum",
+                pool_id="p1",
+                pair="AAA/BBB",
+                fee_tier=3000,
+                reliability_hit_rate_pct=70.0,
+                reliable_occurrences=3,
+                threshold_hourly_yield_pct=0.1,
+                threshold_hourly_usd_per_1000_liquidity=1.0,
+                avg_block_hourly_yield_pct=0.2,
+                p90_block_hourly_yield_pct=0.3,
+                avg_block_hourly_usd_per_1000_liquidity=2.0,
+                p90_block_hourly_usd_per_1000_liquidity=3.0,
+                block_hours=2,
+                next_add_ts=now + 3600,
+                next_remove_ts=now + 10800,
+                pool_score=1.0,
+                baseline_usd_per_1000_hr=0.5,
+                baseline_p75_usd_per_1000_hr=0.6,
+                gross_block_usd_per_1000=4.0,
+                gross_block_usd_per_1000_p90=6.0,
+                baseline_block_usd_per_1000=1.0,
+                baseline_block_p75_usd_per_1000=1.2,
+                incremental_usd_per_1000=3.0,
+                incremental_vs_baseline_p75_usd_per_1000=2.8,
+                incremental_range_usd_per_1000="3.0..2.8",
+                breakeven_move_cost_usd_per_1000=3.0,
+                risk_adjusted_incremental_usd_per_1000=1.5,
+                tvl_median_usd_est=250000.0,
+                max_deployable_usd_est=2000.0,
+                deploy_fraction_cap=0.02,
+                capacity_flag="OK",
+                run_length_p50=2.0,
+                run_length_p90=3.0,
+                hit_rate_pct=50.0,
+                history_quality="ok",
+                nonzero_hours=100,
+                confidence_score=0.5,
+            ),
+            scanner.ScheduleEnhancedRow(
+                pool_rank=2,
+                source_name="s1",
+                version="v3",
+                chain="ethereum",
+                pool_id="p2",
+                pair="CCC/DDD",
+                fee_tier=3000,
+                reliability_hit_rate_pct=70.0,
+                reliable_occurrences=3,
+                threshold_hourly_yield_pct=0.1,
+                threshold_hourly_usd_per_1000_liquidity=1.0,
+                avg_block_hourly_yield_pct=0.2,
+                p90_block_hourly_yield_pct=0.3,
+                avg_block_hourly_usd_per_1000_liquidity=2.0,
+                p90_block_hourly_usd_per_1000_liquidity=3.0,
+                block_hours=2,
+                next_add_ts=now + 3600,
+                next_remove_ts=now + 10800,
+                pool_score=1.0,
+                baseline_usd_per_1000_hr=0.5,
+                baseline_p75_usd_per_1000_hr=0.6,
+                gross_block_usd_per_1000=4.0,
+                gross_block_usd_per_1000_p90=6.0,
+                baseline_block_usd_per_1000=1.0,
+                baseline_block_p75_usd_per_1000=1.2,
+                incremental_usd_per_1000=3.0,
+                incremental_vs_baseline_p75_usd_per_1000=2.8,
+                incremental_range_usd_per_1000="3.0..2.8",
+                breakeven_move_cost_usd_per_1000=3.0,
+                risk_adjusted_incremental_usd_per_1000=1.5,
+                tvl_median_usd_est=250000.0,
+                max_deployable_usd_est=6000.0,
+                deploy_fraction_cap=0.02,
+                capacity_flag="OK",
+                run_length_p50=2.0,
+                run_length_p90=3.0,
+                hit_rate_pct=50.0,
+                history_quality="ok",
+                nonzero_hours=100,
+                confidence_score=0.5,
+            ),
+        ]
+        resolved = scanner.resolve_default_deploy_usd(
+            rows=rows,
+            mode="auto_p50",
+            fixed_value=10000.0,
+            auto_min_usd=1000.0,
+            auto_max_usd=50000.0,
+        )
+        self.assertGreaterEqual(resolved, 2000.0)
+        self.assertLessEqual(resolved, 6000.0)
+
+    def test_choose_fallback_curve_row_prefers_nonzero_move_cost(self) -> None:
+        rows = [
+            scanner.MovesDayCurveRow(
+                objective="risk_adjusted",
+                move_cost_usd_per_move=0.0,
+                deploy_usd=10000.0,
+                max_moves_per_day=4,
+                min_hold_hours=1,
+                cooldown_hours_between_moves=0,
+                selected_blocks_count=10,
+                selected_moves_count=10,
+                total_net_usd=200.0,
+                total_gross_usd=220.0,
+                total_baseline_usd=20.0,
+                notes="ok",
+            ),
+            scanner.MovesDayCurveRow(
+                objective="risk_adjusted",
+                move_cost_usd_per_move=50.0,
+                deploy_usd=10000.0,
+                max_moves_per_day=4,
+                min_hold_hours=1,
+                cooldown_hours_between_moves=0,
+                selected_blocks_count=8,
+                selected_moves_count=8,
+                total_net_usd=150.0,
+                total_gross_usd=200.0,
+                total_baseline_usd=50.0,
+                notes="ok",
+            ),
+        ]
+        picked = scanner.choose_fallback_curve_row(
+            rows=rows,
+            objective="risk_adjusted",
+            default_move_cost_usd=50.0,
+            default_deploy_usd=10000.0,
+            default_max_moves_per_day=4,
+        )
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.move_cost_usd_per_move, 50.0)
+
     def test_llama_pair_hour_query_uses_hourly_alias(self) -> None:
         self.assertIn("hourly: pairHourDatas", scanner.V2_PAIR_HOUR_QUERY)
 
