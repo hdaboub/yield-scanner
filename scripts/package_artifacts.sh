@@ -29,6 +29,7 @@ trap 'rm -f "$tmp_list"' EXIT
     selected_plan_default.csv \
     selected_plan_active.csv \
     source_health.csv \
+    source_tvl_sanity_samples.csv \
     data_quality_audit.csv \
     run_manifest.json \
     dashboard.html \

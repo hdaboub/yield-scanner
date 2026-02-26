@@ -1,6 +1,6 @@
 # Latest Run Analysis
 
-Updated on February 25, 2026 (post-fix run).
+Updated on February 26, 2026.
 
 ## Inputs used
 
@@ -12,51 +12,56 @@ Updated on February 25, 2026 (post-fix run).
 - `output_from_droplet/multichain_3w/data_quality_audit.csv`
 - `output_from_droplet/multichain_3w/source_health.csv`
 
-## Why schedule was empty for some scenarios
+## Current state
 
-- `schedule_enhanced.csv` still shows small `max_deployable_usd_est` values (roughly `$0.5k–$3.1k`).
-- `moves_day_curve.csv` now has non-empty scenarios (for low move-cost assumptions), and selected plan export is populated.
-- Empty scenarios are now explainable via `schedule_run_diagnostics.csv` (capacity and/or net-after-cost filters).
+- `schedule_enhanced.csv` has 52 rows.
+- Capacity distribution (`max_deployable_usd_est`) is wide:
+  - p50: `$5,195`
+  - p75: `$14,525`
+  - p90: `$65,087`
+  - max: `$1,314,291`
+- 30/52 rows are still flagged `LOW_CAPACITY`.
 
-This is not a silent failure: with current data and assumptions, expected block edge does not exceed move costs.
+## Why default schedule can still be empty
+
+- `moves_day_curve.csv` has non-zero scenarios, but the active default scenario can still have 0 selected rows.
+- In current artifacts:
+  - active scenario (`risk_adjusted`, deploy=10000, move_cost=50, max_moves=4) has:
+    - candidates_after_filters=28
+    - selected_blocks_count=0
+    - reason=`net_after_move_cost_or_overlap`
+- This means emptiness is mostly economics/overlap under move-cost assumptions, not a silent data failure.
 
 ## Llama pipeline status
 
-- Llama is healthy in this run:
-  - non-zero fetched rows,
-  - non-zero ranked rows,
-  - threshold/persistence dropoff telemetry present.
-- Diagnostics now include:
-  - requested vs effective window,
-  - index lag fields,
-  - fetch paging range and GraphQL page errors.
+- Healthy:
+  - fetched raw rows: `40,083`
+  - final ranked rows: `301`
+  - status: “Llama pipeline produced ranked rows.”
+- Spike multipliers remain heavy-tailed:
+  - p99: `1635.334`
+  - max: `6656.558`
+- Recommendation: keep persistence + baseline sufficiency gating visible and strict.
 
-## Data quality findings
+## Source health and data quality
 
-- Rejections are dominated by TVL-related issues and TVL floor gating.
-- The audit now splits TVL failures into explicit buckets:
-  - `fees_with_zero_tvl`, `fees_with_missing_tvl`,
-  - `zero_tvl`, `missing_tvl`, `negative_tvl`.
-- Source health remains essential to exclude pathological feeds from schedule optimization.
+- `source_health.csv`: 13 sources total, 4 excluded.
+- Top exclusions remain TVL/fee anomalies:
+  - `uniswap-v4-base-official`: `fees_with_nonpositive_tvl_rate=0.7493`
+  - `uniswap-v3-bnb-official`: `0.1169`
+  - `uniswap-v3-unichain-official`: `0.1095`
+  - `uniswap-v4-bnb-official`: `invalid_fee_tier_rate=0.1430`
+- Data-quality rejects still dominated by TVL-linked reasons and floor gating.
 
-## Changes implemented in this iteration
+## Next iteration priorities
 
-1. Added `run_manifest.json` output with commit, args, window, source endpoints.
-2. Added `scripts/package_artifacts.sh` to reliably include key files, including:
-   - `schedule_run_diagnostics.csv`
-   - `run_manifest.json`
-   - `selected_plan_active.csv`
-3. Added optional llama schedule generation mode:
-   - `--llama-schedule-mode off|merge|llama_only`
-   - recurring buckets from llama ranked spikes.
-4. Added `selected_plan_active.csv` as first-class output and report link.
-5. Extended diagnostics/reporting for llama fetch/index state.
-6. Added static `dashboard.html` generation from `dashboard_state.json` and linked it in `report.html`.
-7. Added artifact workflow scripts:
-   - `scripts/pull_llama_subgraph.sh`
-   - `scripts/unpack_latest_artifacts.py`
-   - `scripts/generate_dashboard_html.py`
-8. Updated artifact packaging to include `dashboard.html` and all scenario `selected_plan_*.csv` files.
+1. Keep auto-quarantine strict, but add targeted source patching (TVL alias/schema fixes) for top offenders.
+2. Improve default scenario selection:
+   - if default selects 0 rows, auto-select highest-net non-empty scenario for `selected_plan_active.csv`.
+3. Keep capacity-aware gate transparent:
+   - always show gate mode/base/effective + max_deployable percentiles in report/dashboard.
+4. Continue separating predictable schedule candidates from ad-hoc spikes:
+   - require stronger baseline sufficiency for multiplier-heavy rows.
 
 ## Repro
 

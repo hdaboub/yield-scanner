@@ -362,6 +362,22 @@ class SourceHealthRow:
 
 
 @dataclass(frozen=True)
+class SourceTvlSanitySampleRow:
+    source_name: str
+    version: str
+    chain: str
+    pool_id: str
+    pair: str
+    fee_tier: int
+    ts: int
+    ts_utc: str
+    ts_chicago: str
+    tvl_usd: float
+    volume_usd: float
+    fees_usd: float
+
+
+@dataclass(frozen=True)
 class V2YieldSpikeRow:
     source_name: str
     chain: str
@@ -1001,6 +1017,23 @@ def parse_args() -> argparse.Namespace:
         help="Minimum median TVL USD per pool for schedule optimizer eligibility (default: 0).",
     )
     parser.add_argument(
+        "--schedule-optimizer-fallback",
+        action="store_true",
+        help="Enable optimizer fallback ladder (gate/min_incremental/min_hold relaxation) when default scenario yields zero candidates.",
+    )
+    parser.add_argument(
+        "--disable-schedule-optimizer-fallback",
+        dest="schedule_optimizer_fallback",
+        action="store_false",
+        help="Disable optimizer fallback ladder.",
+    )
+    parser.add_argument(
+        "--schedule-optimizer-fallback-max-steps",
+        type=int,
+        default=5,
+        help="Maximum fallback ladder steps for optimizer relaxation (default: 5).",
+    )
+    parser.add_argument(
         "--max-fees-with-nonpositive-tvl-rate",
         type=float,
         default=0.10,
@@ -1089,6 +1122,7 @@ def parse_args() -> argparse.Namespace:
         help="Token price source for charts (default: coingecko).",
     )
     parser.set_defaults(charts_enable=True)
+    parser.set_defaults(schedule_optimizer_fallback=True)
     return parser.parse_args()
 
 
@@ -1792,6 +1826,58 @@ def compute_source_tvl_alias_sanity(
         if obs.fees_usd is not None and obs.tvl_usd <= 0:
             counts[(obs.source_name, obs.version, obs.chain)] += 1
     return dict(counts)
+
+
+def collect_source_tvl_sanity_samples(
+    observations: list[Observation],
+    v2_spike_sources: set[str] | None = None,
+    top_sources: int = 6,
+    per_source: int = 5,
+) -> list[SourceTvlSanitySampleRow]:
+    if top_sources <= 0 or per_source <= 0:
+        return []
+    counts = compute_source_tvl_alias_sanity(observations, v2_spike_sources=v2_spike_sources)
+    top_keys = {
+        key
+        for key, _count in sorted(
+            counts.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:top_sources]
+    }
+    if not top_keys:
+        return []
+    emitted: dict[tuple[str, str, str], int] = defaultdict(int)
+    samples: list[SourceTvlSanitySampleRow] = []
+    for obs in observations:
+        key = (obs.source_name, obs.version, obs.chain)
+        if key not in top_keys:
+            continue
+        is_v2_spike = v2_spike_sources is not None and obs.source_name in v2_spike_sources
+        if is_v2_spike:
+            continue
+        if obs.fees_usd is None or obs.tvl_usd > 0:
+            continue
+        if emitted[key] >= per_source:
+            continue
+        emitted[key] += 1
+        samples.append(
+            SourceTvlSanitySampleRow(
+                source_name=obs.source_name,
+                version=obs.version,
+                chain=obs.chain,
+                pool_id=obs.pool_id,
+                pair=obs.pair,
+                fee_tier=obs.fee_tier,
+                ts=obs.ts,
+                ts_utc=iso_hour(obs.ts),
+                ts_chicago=format_ts_cst(obs.ts),
+                tvl_usd=obs.tvl_usd,
+                volume_usd=obs.volume_usd,
+                fees_usd=(obs.fees_usd if obs.fees_usd is not None else 0.0),
+            )
+        )
+    return samples
 
 
 V2_PAIR_HOUR_QUERY = """
@@ -4239,6 +4325,48 @@ def write_source_health_csv(path: Path, rows: Iterable[SourceHealthRow]) -> None
             )
 
 
+def write_source_tvl_sanity_samples_csv(
+    path: Path,
+    rows: Iterable[SourceTvlSanitySampleRow],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "source_name",
+                "version",
+                "chain",
+                "pool_id",
+                "pair",
+                "fee_tier",
+                "ts",
+                "ts_utc",
+                "ts_chicago",
+                "tvl_usd",
+                "volume_usd",
+                "fees_usd",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.source_name,
+                    row.version,
+                    row.chain,
+                    row.pool_id,
+                    row.pair,
+                    row.fee_tier,
+                    row.ts,
+                    row.ts_utc,
+                    row.ts_chicago,
+                    f"{row.tvl_usd:.8f}",
+                    f"{row.volume_usd:.8f}",
+                    f"{row.fees_usd:.8f}",
+                ]
+            )
+
+
 def _png_write_rgb(path: Path, width: int, height: int, pixels: list[tuple[int, int, int]]) -> None:
     import struct
     import zlib
@@ -6178,6 +6306,12 @@ def write_dashboard_state_json(
     configured_default_deploy_usd: float = 0.0,
     schedule_force_include_sources: list[str] | None = None,
     schedule_force_exclude_sources: list[str] | None = None,
+    schedule_optimizer_trace: str = "",
+    schedule_gate_mode: str = "",
+    schedule_gate_base_usd: float = 0.0,
+    schedule_gate_effective_usd: float = 0.0,
+    schedule_min_incremental_usd_per_1000: float = 0.0,
+    schedule_min_hold_hours: int = 1,
 ) -> dict[str, Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
     chart_assets = chart_assets or {}
@@ -6306,6 +6440,12 @@ def write_dashboard_state_json(
             "configured_default_deploy_usd": configured_default_deploy_usd,
             "schedule_force_include_sources": list(schedule_force_include_sources or []),
             "schedule_force_exclude_sources": list(schedule_force_exclude_sources or []),
+            "schedule_optimizer_trace": schedule_optimizer_trace,
+            "schedule_gate_mode": schedule_gate_mode,
+            "schedule_gate_base_usd": schedule_gate_base_usd,
+            "schedule_gate_effective_usd": schedule_gate_effective_usd,
+            "schedule_min_incremental_usd_per_1000": schedule_min_incremental_usd_per_1000,
+            "schedule_min_hold_hours": schedule_min_hold_hours,
             "scenario_plan_filename": scenario_plan_filename,
             "selected_plan_context": selected_plan_context,
             "selected_plan_context_scenario": selected_plan_context_scenario,
@@ -7188,6 +7328,19 @@ def write_report_html(
     configured_default_deploy_usd: float = 0.0,
     schedule_force_include_sources: list[str] | None = None,
     schedule_force_exclude_sources: list[str] | None = None,
+    schedule_optimizer_trace: str = "",
+    schedule_gate_mode: str = "",
+    schedule_gate_base_usd: float = 0.0,
+    schedule_gate_effective_usd: float = 0.0,
+    schedule_min_incremental_usd_per_1000: float = 0.0,
+    schedule_min_hold_hours: int = 1,
+    schedule_min_max_deployable_usd: float = 0.0,
+    schedule_absolute_min_max_deployable_usd: float = 0.0,
+    schedule_min_tvl_usd: float = 0.0,
+    max_fees_with_nonpositive_tvl_rate: float = 0.10,
+    max_invalid_fee_tier_rate: float = 0.10,
+    max_implied_fee_anomaly_rate: float = 0.10,
+    source_tvl_sanity_samples: list[SourceTvlSanitySampleRow] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     schedule_enhanced = schedule_enhanced or []
@@ -7200,6 +7353,7 @@ def write_report_html(
     quality_reason_totals = quality_reason_totals or {}
     schedule_force_include_sources = schedule_force_include_sources or []
     schedule_force_exclude_sources = schedule_force_exclude_sources or []
+    source_tvl_sanity_samples = source_tvl_sanity_samples or []
     top_rankings = rankings[:top_n]
     top_schedules = schedules[:top_n]
     top_schedule_enhanced = schedule_enhanced[:top_n]
@@ -7480,6 +7634,28 @@ def write_report_html(
             f"p90=${percentile(max_dep, 0.90):,.2f}, max=${max(max_dep):,.2f}. "
             f"{clipped}/{len(max_dep)} blocks are clipped below requested deploy (${default_deploy_usd:,.0f})."
         )
+    schedule_threshold_note = (
+        "Effective threshold summary: "
+        f"schedule_gate_mode={schedule_gate_mode or 'n/a'}, "
+        f"schedule_gate_base_usd=${schedule_gate_base_usd:,.2f}, "
+        f"schedule_gate_effective_usd=${schedule_gate_effective_usd:,.2f}, "
+        f"min_incremental_usd_per_1000={schedule_min_incremental_usd_per_1000:.4f}, "
+        f"min_hold_hours={max(1, int(schedule_min_hold_hours))}, "
+        f"schedule_min_max_deployable_usd(configured)=${schedule_min_max_deployable_usd:,.2f}, "
+        f"schedule_absolute_min_max_deployable_usd=${schedule_absolute_min_max_deployable_usd:,.2f}, "
+        f"schedule_min_tvl_usd=${schedule_min_tvl_usd:,.2f}."
+    )
+    if schedule_enhanced:
+        max_dep = [max(0.0, row.max_deployable_usd_est) for row in schedule_enhanced]
+        schedule_threshold_note += (
+            " Observed max_deployable_usd_est distribution: "
+            f"p50=${percentile(max_dep, 0.50):,.2f}, "
+            f"p75=${percentile(max_dep, 0.75):,.2f}, "
+            f"p90=${percentile(max_dep, 0.90):,.2f}, "
+            f"max=${max(max_dep):,.2f}."
+        )
+    if schedule_optimizer_trace:
+        schedule_threshold_note += f" Optimizer ladder trace: {schedule_optimizer_trace}."
     quality_implied_count = sum(
         count
         for reason, count in quality_reason_totals.items()
@@ -7495,6 +7671,12 @@ def write_report_html(
         f"Data-quality anomalies: implied_fee_rate rejects={quality_implied_count:,} "
         f"(cap={max_implied_fee_rate:.2%}), invalid_fee_tier rejects={quality_invalid_fee_count:,}, "
         f"fees_with_nonpositive_tvl rejects={quality_tvl_nonpositive_count:,}."
+    )
+    source_threshold_note = (
+        "Source exclusion thresholds: "
+        f"max_fees_with_nonpositive_tvl_rate={max_fees_with_nonpositive_tvl_rate:.2%}, "
+        f"max_invalid_fee_tier_rate={max_invalid_fee_tier_rate:.2%}, "
+        f"max_implied_fee_anomaly_rate={max_implied_fee_anomaly_rate:.2%}."
     )
     source_override_note = (
         f"Manual source overrides: include={len(schedule_force_include_sources)}, "
@@ -7514,6 +7696,23 @@ def write_report_html(
             for r in excluded_source_rows[:20]
         ]
     ) if excluded_source_rows else "<tr><td colspan='6'>No sources currently excluded.</td></tr>"
+    tvl_sanity_samples_html = "".join(
+        [
+            "<tr>"
+            f"<td>{html.escape(r.source_name)}</td>"
+            f"<td>{html.escape(r.version)}</td>"
+            f"<td>{html.escape(r.chain)}</td>"
+            f"<td>{html.escape(r.pool_id)}</td>"
+            f"<td>{html.escape(r.pair)}</td>"
+            f"<td>{r.fee_tier}</td>"
+            f"<td>{html.escape(r.ts_chicago)}</td>"
+            f"<td>{r.tvl_usd:.2f}</td>"
+            f"<td>{r.volume_usd:.2f}</td>"
+            f"<td>{r.fees_usd:.2f}</td>"
+            "</tr>"
+            for r in source_tvl_sanity_samples[:50]
+        ]
+    ) if source_tvl_sanity_samples else "<tr><td colspan='10'>No TVL sanity samples generated.</td></tr>"
     jump_table_html = "\n".join(jump_rows) if jump_rows else (
         "<tr><td colspan='13'>No urgent pool windows found in the near-term schedule horizon.</td></tr>"
     )
@@ -7781,6 +7980,7 @@ def write_report_html(
         <a href="dashboard.html">dashboard.html</a>
         <a href="run_manifest.json">run_manifest.json</a>
         <a href="source_health.csv">source_health.csv</a>
+        <a href="source_tvl_sanity_samples.csv">source_tvl_sanity_samples.csv</a>
         <a href="sushi_v2_yield_spikes.csv">sushi_v2_yield_spikes.csv</a>
         <a href="llama_pair_hour_data.csv">llama_pair_hour_data.csv</a>
         <a href="llama_weth_spike_rankings.csv">llama_weth_spike_rankings.csv</a>
@@ -7833,7 +8033,27 @@ def write_report_html(
         </table>
       </div>
       <p class="note">{html.escape(quality_anomaly_note)}</p>
+      <p class="note">{html.escape(source_threshold_note)}</p>
       <p class="note">{html.escape(source_override_note)}</p>
+    </section>
+
+    <section class="card">
+      <h2>TVL Sanity Samples (Top Offenders)</h2>
+      <p class="note">
+        Sample rows where fees exist but TVL is non-positive. Likely cause: GraphQL TVL field alias mismatch for the source hour entity.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th><th>Version</th><th>Chain</th><th>Pool ID</th><th>Pair</th><th>Fee Tier</th><th>Hour (CST)</th><th>TVL USD</th><th>Volume USD</th><th>Fees USD</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tvl_sanity_samples_html}
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="card">
@@ -7844,6 +8064,9 @@ def write_report_html(
       </p>
       <p class="note">
         Deploy sizing mode: {html.escape(default_deploy_mode)} (configured deploy=${configured_default_deploy_usd:,.0f}, active deploy=${default_deploy_usd:,.0f}).
+      </p>
+      <p class="note">
+        {html.escape(schedule_threshold_note)}
       </p>
       <p class="note">
         {html.escape(selected_plan_context_note)}
@@ -8349,6 +8572,12 @@ def main() -> int:
         max_invalid_fee_tier_rate=args.max_invalid_fee_tier_rate,
         max_implied_fee_anomaly_rate=args.max_implied_fee_anomaly_rate,
     )
+    source_tvl_sanity_samples = collect_source_tvl_sanity_samples(
+        observations=observations,
+        v2_spike_sources=v2_spike_sources,
+        top_sources=8,
+        per_source=8,
+    )
     source_health_history_file = Path(args.source_health_history_file).expanduser()
     source_health_history = load_source_health_history(source_health_history_file)
     source_health_rows, source_health_history = apply_persistent_source_quarantine(
@@ -8634,7 +8863,7 @@ def main() -> int:
             "WARNING: run stats sanity exceeded 2%; investigate thresholding/history quality.",
             file=sys.stderr,
         )
-    schedule_enhanced = build_schedule_enhanced_rows(
+    base_schedule_enhanced = build_schedule_enhanced_rows(
         schedules=schedules,
         observations=ranking_observations,
         rankings=rankings,
@@ -8647,12 +8876,136 @@ def main() -> int:
         capacity_deploy_fraction_cap=args.capacity_deploy_fraction_cap,
         capacity_warning_usd=args.schedule_min_max_deployable_usd,
     )
-    resolved_default_deploy_usd = resolve_default_deploy_usd(
-        rows=schedule_enhanced,
-        mode=args.default_deploy_mode,
-        fixed_value=args.default_deploy_usd,
-        auto_min_usd=args.default_deploy_auto_min_usd,
-        auto_max_usd=args.default_deploy_auto_max_usd,
+    max_moves_per_day_scenarios = sorted({1, 2, 4, 8, int(args.default_max_moves_per_day)})
+    optimizer_move_cost_scenarios = [0.0, 25.0, 50.0, 100.0, 250.0]
+    resolved_default_deploy_usd = float(args.default_deploy_usd)
+    resolved_schedule_min_max_deployable_usd = float(args.schedule_min_max_deployable_usd)
+    resolved_schedule_gate_base_usd = resolved_schedule_min_max_deployable_usd
+    resolved_optimizer_min_incremental_usd_per_1000 = float(args.min_incremental_usd_per_1000)
+    resolved_optimizer_min_hold_hours = int(max(1, args.moves_min_hold_hours))
+    schedule_optimizer_trace_parts: list[str] = []
+
+    schedule_enhanced = base_schedule_enhanced
+    moves_day_curve: list[MovesDayCurveRow] = []
+    schedule_run_diagnostics: list[ScheduleRunDiagnosticsRow] = []
+    selected_plan_default: list[SelectedPlanRow] = []
+    schedule_summary_stats = summarize_schedule_enhanced(schedule_enhanced)
+
+    ladder_steps: list[tuple[str, float, float, int]] = [
+        ("base", 1.00, float(args.min_incremental_usd_per_1000), int(max(1, args.moves_min_hold_hours))),
+    ]
+    if args.schedule_optimizer_fallback:
+        ladder_steps.extend(
+            [
+                ("relax_gate_75", 0.75, float(args.min_incremental_usd_per_1000), int(max(1, args.moves_min_hold_hours))),
+                ("relax_gate_50", 0.50, float(args.min_incremental_usd_per_1000), int(max(1, args.moves_min_hold_hours))),
+                ("relax_min_inc_50", 0.50, float(args.min_incremental_usd_per_1000) * 0.50, int(max(1, args.moves_min_hold_hours))),
+                ("relax_min_inc_25", 0.50, float(args.min_incremental_usd_per_1000) * 0.25, int(max(1, args.moves_min_hold_hours - 1))),
+            ]
+        )
+    ladder_steps = ladder_steps[: max(1, int(args.schedule_optimizer_fallback_max_steps))]
+
+    for idx, (label, gate_multiplier, min_incremental, min_hold_hours_eff) in enumerate(ladder_steps):
+        if idx == 0 and abs(min_incremental - args.min_incremental_usd_per_1000) < 1e-12:
+            candidate_schedule_enhanced = base_schedule_enhanced
+        else:
+            candidate_schedule_enhanced = build_schedule_enhanced_rows(
+                schedules=schedules,
+                observations=ranking_observations,
+                rankings=rankings,
+                spike_stats=spike_run_stats,
+                end_ts=end_ts,
+                baseline_window_days=30,
+                baseline_top_k=200,
+                require_history_quality_ok=args.require_run_history_quality_ok,
+                min_incremental_usd_per_1000=max(0.0, float(min_incremental)),
+                capacity_deploy_fraction_cap=args.capacity_deploy_fraction_cap,
+                capacity_warning_usd=args.schedule_min_max_deployable_usd,
+            )
+        base_gate = resolve_schedule_min_max_deployable_usd(
+            rows=candidate_schedule_enhanced,
+            mode=args.schedule_min_max_deployable_mode,
+            fixed_value=args.schedule_min_max_deployable_usd,
+        )
+        candidate_gate = max(0.0, base_gate * max(0.0, gate_multiplier))
+        candidate_default_deploy = resolve_default_deploy_usd(
+            rows=candidate_schedule_enhanced,
+            mode=args.default_deploy_mode,
+            fixed_value=args.default_deploy_usd,
+            auto_min_usd=args.default_deploy_auto_min_usd,
+            auto_max_usd=args.default_deploy_auto_max_usd,
+        )
+        deploy_scenarios = sorted(
+            {
+                1000.0,
+                10000.0,
+                float(args.default_deploy_usd),
+                float(candidate_default_deploy),
+            }
+        )
+        candidate_moves_curve = build_moves_day_curve(
+            schedule_rows=candidate_schedule_enhanced,
+            move_cost_scenarios=optimizer_move_cost_scenarios,
+            deploy_scenarios=deploy_scenarios,
+            max_moves_per_day_scenarios=max_moves_per_day_scenarios,
+            min_hold_hours=min_hold_hours_eff,
+            cooldown_hours_between_moves=args.moves_cooldown_hours,
+            objective=args.optimizer_objective,
+            schedule_min_max_deployable_usd=candidate_gate,
+            schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+            schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+        )
+        candidate_diagnostics = build_schedule_run_diagnostics(
+            schedule_rows=candidate_schedule_enhanced,
+            objective=args.optimizer_objective,
+            move_cost_scenarios=optimizer_move_cost_scenarios,
+            deploy_scenarios=deploy_scenarios,
+            max_moves_per_day_scenarios=max_moves_per_day_scenarios,
+            min_hold_hours=min_hold_hours_eff,
+            cooldown_hours_between_moves=args.moves_cooldown_hours,
+            schedule_min_max_deployable_usd=candidate_gate,
+            schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+            schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+            excluded_by_source_health=excluded_schedule_rows_by_source_health,
+        )
+        candidate_selected_default = select_schedule_plan(
+            schedule_rows=candidate_schedule_enhanced,
+            objective=args.optimizer_objective,
+            move_cost_usd_per_move=args.default_move_cost_usd,
+            deploy_usd=candidate_default_deploy,
+            max_moves_per_day=args.default_max_moves_per_day,
+            min_hold_hours=min_hold_hours_eff,
+            cooldown_hours_between_moves=args.moves_cooldown_hours,
+            schedule_min_max_deployable_usd=candidate_gate,
+            schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+            schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+        )
+        schedule_optimizer_trace_parts.append(
+            (
+                f"{label}(gate=${candidate_gate:,.0f},min_inc={min_incremental:.4f},hold={min_hold_hours_eff})"
+                f"={len(candidate_selected_default)}"
+            )
+        )
+        schedule_enhanced = candidate_schedule_enhanced
+        moves_day_curve = candidate_moves_curve
+        schedule_run_diagnostics = candidate_diagnostics
+        selected_plan_default = candidate_selected_default
+        schedule_summary_stats = summarize_schedule_enhanced(schedule_enhanced)
+        resolved_default_deploy_usd = candidate_default_deploy
+        resolved_schedule_min_max_deployable_usd = candidate_gate
+        resolved_schedule_gate_base_usd = base_gate
+        resolved_optimizer_min_incremental_usd_per_1000 = max(0.0, float(min_incremental))
+        resolved_optimizer_min_hold_hours = int(max(1, min_hold_hours_eff))
+        if selected_plan_default:
+            break
+
+    schedule_optimizer_trace = " -> ".join(schedule_optimizer_trace_parts) if schedule_optimizer_trace_parts else "n/a"
+    print(
+        (
+            "Optimizer ladder trace: "
+            f"{schedule_optimizer_trace}"
+        ),
+        file=sys.stderr,
     )
     print(
         (
@@ -8662,72 +9015,21 @@ def main() -> int:
         ),
         file=sys.stderr,
     )
-    deploy_scenarios = sorted(
-        {
-            1000.0,
-            10000.0,
-            float(args.default_deploy_usd),
-            float(resolved_default_deploy_usd),
-        }
-    )
-    max_moves_per_day_scenarios = sorted({1, 2, 4, 8, int(args.default_max_moves_per_day)})
-    schedule_summary_stats = summarize_schedule_enhanced(schedule_enhanced)
-    resolved_schedule_min_max_deployable_usd = resolve_schedule_min_max_deployable_usd(
-        rows=schedule_enhanced,
-        mode=args.schedule_min_max_deployable_mode,
-        fixed_value=args.schedule_min_max_deployable_usd,
-    )
     print(
         (
             "Resolved schedule max deployable gate: "
             f"mode={args.schedule_min_max_deployable_mode}, "
-            f"value={resolved_schedule_min_max_deployable_usd:.2f} USD"
+            f"base={resolved_schedule_gate_base_usd:.2f} USD, "
+            f"effective={resolved_schedule_min_max_deployable_usd:.2f} USD"
         ),
         file=sys.stderr,
-    )
-    moves_day_curve = build_moves_day_curve(
-        schedule_rows=schedule_enhanced,
-        move_cost_scenarios=[0.0, 25.0, 50.0, 100.0, 250.0],
-        deploy_scenarios=deploy_scenarios,
-        max_moves_per_day_scenarios=max_moves_per_day_scenarios,
-        min_hold_hours=args.moves_min_hold_hours,
-        cooldown_hours_between_moves=args.moves_cooldown_hours,
-        objective=args.optimizer_objective,
-        schedule_min_max_deployable_usd=resolved_schedule_min_max_deployable_usd,
-        schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
-        schedule_min_tvl_usd=args.schedule_min_tvl_usd,
-    )
-    schedule_run_diagnostics = build_schedule_run_diagnostics(
-        schedule_rows=schedule_enhanced,
-        objective=args.optimizer_objective,
-        move_cost_scenarios=[0.0, 25.0, 50.0, 100.0, 250.0],
-        deploy_scenarios=deploy_scenarios,
-        max_moves_per_day_scenarios=max_moves_per_day_scenarios,
-        min_hold_hours=args.moves_min_hold_hours,
-        cooldown_hours_between_moves=args.moves_cooldown_hours,
-        schedule_min_max_deployable_usd=resolved_schedule_min_max_deployable_usd,
-        schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
-        schedule_min_tvl_usd=args.schedule_min_tvl_usd,
-        excluded_by_source_health=excluded_schedule_rows_by_source_health,
-    )
-    selected_plan_default = select_schedule_plan(
-        schedule_rows=schedule_enhanced,
-        objective=args.optimizer_objective,
-        move_cost_usd_per_move=args.default_move_cost_usd,
-        deploy_usd=resolved_default_deploy_usd,
-        max_moves_per_day=args.default_max_moves_per_day,
-        min_hold_hours=args.moves_min_hold_hours,
-        cooldown_hours_between_moves=args.moves_cooldown_hours,
-        schedule_min_max_deployable_usd=resolved_schedule_min_max_deployable_usd,
-        schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
-        schedule_min_tvl_usd=args.schedule_min_tvl_usd,
     )
     selected_plan_for_state = selected_plan_default
     selected_plan_context = "active"
     selected_plan_context_scenario = (
         f"{args.optimizer_objective}|deploy={resolved_default_deploy_usd:.0f}|"
         f"cost={args.default_move_cost_usd:.0f}|moves={args.default_max_moves_per_day}|"
-        f"hold={max(1, args.moves_min_hold_hours)}"
+        f"hold={max(1, resolved_optimizer_min_hold_hours)}"
     )
     if not selected_plan_for_state:
         fb = choose_fallback_curve_row(
@@ -8804,6 +9106,7 @@ def main() -> int:
     selected_plan_active_csv = output_dir / "selected_plan_active.csv"
     run_manifest_json = output_dir / "run_manifest.json"
     source_health_csv = output_dir / "source_health.csv"
+    source_tvl_sanity_csv = output_dir / "source_tvl_sanity_samples.csv"
     dashboard_state_json = output_dir / "dashboard_state.json"
     dashboard_html = output_dir / "dashboard.html"
     schedule_md = output_dir / "liquidity_schedule.md"
@@ -8850,6 +9153,7 @@ def main() -> int:
         output_dir=output_dir,
     )
     write_source_health_csv(source_health_csv, source_health_rows)
+    write_source_tvl_sanity_samples_csv(source_tvl_sanity_csv, source_tvl_sanity_samples)
     dashboard_state = write_dashboard_state_json(
         path=dashboard_state_json,
         generated_ts=generated_now_ts,
@@ -8876,6 +9180,12 @@ def main() -> int:
         configured_default_deploy_usd=args.default_deploy_usd,
         schedule_force_include_sources=list(args.schedule_force_include_source),
         schedule_force_exclude_sources=list(args.schedule_force_exclude_source),
+        schedule_optimizer_trace=schedule_optimizer_trace,
+        schedule_gate_mode=args.schedule_min_max_deployable_mode,
+        schedule_gate_base_usd=resolved_schedule_gate_base_usd,
+        schedule_gate_effective_usd=resolved_schedule_min_max_deployable_usd,
+        schedule_min_incremental_usd_per_1000=resolved_optimizer_min_incremental_usd_per_1000,
+        schedule_min_hold_hours=resolved_optimizer_min_hold_hours,
     )
     write_dashboard_html(dashboard_html, dashboard_state)
     write_v2_spike_csv(v2_spike_csv, v2_spike_rows)
@@ -8950,6 +9260,19 @@ def main() -> int:
         configured_default_deploy_usd=args.default_deploy_usd,
         schedule_force_include_sources=list(args.schedule_force_include_source),
         schedule_force_exclude_sources=list(args.schedule_force_exclude_source),
+        schedule_optimizer_trace=schedule_optimizer_trace,
+        schedule_gate_mode=args.schedule_min_max_deployable_mode,
+        schedule_gate_base_usd=resolved_schedule_gate_base_usd,
+        schedule_gate_effective_usd=resolved_schedule_min_max_deployable_usd,
+        schedule_min_incremental_usd_per_1000=resolved_optimizer_min_incremental_usd_per_1000,
+        schedule_min_hold_hours=resolved_optimizer_min_hold_hours,
+        schedule_min_max_deployable_usd=args.schedule_min_max_deployable_usd,
+        schedule_absolute_min_max_deployable_usd=args.schedule_absolute_min_max_deployable_usd,
+        schedule_min_tvl_usd=args.schedule_min_tvl_usd,
+        max_fees_with_nonpositive_tvl_rate=args.max_fees_with_nonpositive_tvl_rate,
+        max_invalid_fee_tier_rate=args.max_invalid_fee_tier_rate,
+        max_implied_fee_anomaly_rate=args.max_implied_fee_anomaly_rate,
+        source_tvl_sanity_samples=source_tvl_sanity_samples,
     )
 
     print_top(rankings, args.top)
@@ -8989,6 +9312,7 @@ def main() -> int:
     print(f"Wrote: {run_manifest_json}", file=sys.stderr)
     print(f"Wrote: {scenario_plan_csv}", file=sys.stderr)
     print(f"Wrote: {source_health_csv}", file=sys.stderr)
+    print(f"Wrote: {source_tvl_sanity_csv}", file=sys.stderr)
     print(f"Wrote: {dashboard_state_json}", file=sys.stderr)
     print(f"Wrote: {dashboard_html}", file=sys.stderr)
     if args.charts_enable:

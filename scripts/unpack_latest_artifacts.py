@@ -25,6 +25,7 @@ REQUIRED_FILES = [
     "llama_weth_spike_rankings.csv",
     "llama_run_diagnostics.csv",
     "source_health.csv",
+    "source_tvl_sanity_samples.csv",
     "data_quality_audit.csv",
 ]
 

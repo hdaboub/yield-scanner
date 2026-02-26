@@ -471,6 +471,7 @@ def main() -> None:
     excluded_sources = pd.DataFrame(state.get("excluded_sources", []))
     schedule_enhanced = _read_csv(artifacts / "schedule_enhanced.csv")
     llama_rank = _read_csv(artifacts / "llama_weth_spike_rankings.csv")
+    source_tvl_sanity = _read_csv(artifacts / "source_tvl_sanity_samples.csv")
     eth_px = _eth_price_series(artifacts, days=7)
     source_options: list[str] = []
     if not source_health.empty:
@@ -569,6 +570,16 @@ def main() -> None:
         "Excluded Sources",
         int(source_health.get("excluded_from_schedule", pd.Series(dtype=bool)).sum()) if not source_health.empty else 0,
     )
+    st.caption(
+        "Effective schedule gate: "
+        f"mode={defaults.get('schedule_gate_mode', 'n/a')}, "
+        f"base=${float(defaults.get('schedule_gate_base_usd', 0.0) or 0.0):,.2f}, "
+        f"effective=${float(defaults.get('schedule_gate_effective_usd', 0.0) or 0.0):,.2f}; "
+        f"min_incremental={float(defaults.get('schedule_min_incremental_usd_per_1000', 0.0) or 0.0):.4f}, "
+        f"min_hold={int(defaults.get('schedule_min_hold_hours', 1) or 1)}h."
+    )
+    if str(defaults.get("schedule_optimizer_trace", "")).strip():
+        st.caption(f"Optimizer ladder trace: {defaults.get('schedule_optimizer_trace')}")
 
     st.subheader("Excluded Sources + Reasons")
     if excluded_sources.empty:
@@ -720,6 +731,28 @@ def main() -> None:
         st.info("No source health rows.")
     else:
         st.dataframe(source_health, use_container_width=True)
+
+    st.subheader("TVL Sanity Samples (Top Offenders)")
+    if source_tvl_sanity.empty:
+        st.info("No source_tvl_sanity_samples.csv rows.")
+    else:
+        keep_cols = [
+            c
+            for c in [
+                "source_name",
+                "version",
+                "chain",
+                "pool_id",
+                "pair",
+                "fee_tier",
+                "ts_chicago",
+                "tvl_usd",
+                "volume_usd",
+                "fees_usd",
+            ]
+            if c in source_tvl_sanity.columns
+        ]
+        st.dataframe(source_tvl_sanity[keep_cols].head(80), use_container_width=True)
 
     st.subheader("Operator Decision Charts (Top Pools)")
     hourly = _read_csv(artifacts / "hourly_observations.csv")
