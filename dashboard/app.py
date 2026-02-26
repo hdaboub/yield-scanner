@@ -139,6 +139,41 @@ def _hourly_heatmap(df: pd.DataFrame, value_col: str, title: str) -> go.Figure:
     return fig
 
 
+def _add_hourly_datetime(df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
+    work = df.copy()
+    timestamp_candidates = [
+        "ts",
+        "timestamp",
+        "hourStartUnix",
+        "hour_start_unix",
+        "hour_start_ts",
+        "time",
+    ]
+    ts_col = next((c for c in timestamp_candidates if c in work.columns), None)
+    if ts_col is not None:
+        series = pd.to_numeric(work[ts_col], errors="coerce")
+        if series.notna().any():
+            # Heuristic: values > 1e12 are likely milliseconds.
+            if float(series.dropna().median()) > 1e12:
+                work["dt"] = pd.to_datetime(series, unit="ms", utc=True, errors="coerce")
+            else:
+                work["dt"] = pd.to_datetime(series, unit="s", utc=True, errors="coerce")
+            if work["dt"].notna().any():
+                return work, None
+    string_candidates = [
+        "hour_utc",
+        "hourStartUTC",
+        "hour_start_utc",
+        "datetime_utc",
+    ]
+    str_col = next((c for c in string_candidates if c in work.columns), None)
+    if str_col is not None:
+        work["dt"] = pd.to_datetime(work[str_col], utc=True, errors="coerce")
+        if work["dt"].notna().any():
+            return work, None
+    return work, "No usable timestamp column found (expected one of ts/timestamp/hourStartUnix/hour_utc)."
+
+
 def _ssh_run(host: str, command: str, timeout: int = 30) -> tuple[int, str, str]:
     if not host.strip():
         return 2, "", "Remote host is not configured. Set YIELD_SCANNER_REMOTE_HOST or use the sidebar field."
@@ -691,8 +726,11 @@ def main() -> None:
     if hourly.empty:
         st.info("hourly_observations.csv not available.")
     else:
+        hourly, dt_err = _add_hourly_datetime(hourly)
+        if dt_err is not None:
+            st.warning(dt_err)
+            return
         hourly["pool_id"] = hourly.get("pool_id", "").astype(str)
-        hourly["dt"] = pd.to_datetime(hourly["ts"], unit="s", utc=True)
         hourly["usd_per_1000_liquidity_hourly"] = pd.to_numeric(
             hourly.get("fees_usd_per_1000_liquidity_hourly", 0.0), errors="coerce"
         ).fillna(0.0)
@@ -749,8 +787,12 @@ def main() -> None:
         st.info("No rows for selected pool.")
         return
     pool_df = pool_df.sort_values("dt")
+    hourly_yield_series = pd.to_numeric(pool_df.get("hourly_yield", pd.Series(dtype=float)), errors="coerce")
+    if hourly_yield_series.empty or hourly_yield_series.notna().sum() == 0:
+        # Backward/forward compatibility: some exports only include hourly_yield_pct.
+        hourly_yield_series = pd.to_numeric(pool_df.get("hourly_yield_pct", 0.0), errors="coerce") / 100.0
     pool_df["volatility_proxy"] = (
-        pd.to_numeric(pool_df.get("hourly_yield", 0.0), errors="coerce")
+        hourly_yield_series
         .fillna(0.0)
         .rolling(24, min_periods=3)
         .std()
